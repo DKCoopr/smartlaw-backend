@@ -1,34 +1,23 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+import os
 from functools import lru_cache
 
 
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        case_sensitive=False,
-        extra="ignore",
-    )
+class Settings:
+    def __init__(self):
+        self.app_env = os.environ.get("APP_ENV", "development")
+        self.app_secret_key = os.environ.get("APP_SECRET_KEY", "change-me")
+        self.frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:5173")
 
-    # App
-    app_env: str = "development"
-    app_secret_key: str = "change-me"
-    frontend_url: str = "http://localhost:5173"
+        self.supabase_url = os.environ.get("SUPABASE_URL", "")
+        self.supabase_anon_key = os.environ.get("SUPABASE_ANON_KEY", "")
+        self.supabase_service_key = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
-    # Supabase
-    supabase_url: str = ""
-    supabase_anon_key: str = ""
-    supabase_service_key: str = ""
+        self.openai_api_key = os.environ.get("OPENAI_API_KEY", "")
+        self.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        self.google_api_key = os.environ.get("GOOGLE_API_KEY", "")
 
-    # AI APIs
-    openai_api_key: str = ""
-    anthropic_api_key: str = ""
-    google_api_key: str = ""
-
-    # Redis
-    redis_url: str = "redis://localhost:6379"
-
-    # Limits
-    max_audio_mb: int = 25
+        self.redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+        self.max_audio_mb = int(os.environ.get("MAX_AUDIO_MB", "25"))
 
 
 @lru_cache()
