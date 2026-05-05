@@ -1,0 +1,32 @@
+# FastAPI core
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+python-dotenv==1.0.1
+pydantic==2.7.1
+pydantic-settings==2.2.1
+
+# Supabase
+supabase==2.4.2
+
+# AI APIs
+openai==1.30.1
+anthropic==0.28.0
+google-generativeai==0.6.0
+
+# Background tasks
+celery==5.4.0
+redis==5.0.4
+
+# Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# HTTP client (async)
+httpx==0.27.0
+
+# Audio processing
+pydub==0.25.1
+
+# Utilities
+orjson==3.10.3
