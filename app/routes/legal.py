@@ -1,15 +1,24 @@
-"""Legal analysis routes — Claude-powered case analysis + draft documents."""
+"""Legal analysis routes — Claude (Sonnet/Opus auto-selected) + GPT-4o polish."""
+import asyncio
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import anthropic
 from app.auth import get_current_user_id
 from app.config import get_settings
+from app.services.gpt4o import polish_thai_legal
 
 router = APIRouter(prefix="/api/legal", tags=["legal"])
 
 settings = get_settings()
 _claude = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+
+# Models
+SONNET = "claude-sonnet-4-6"
+OPUS   = "claude-opus-4-7"
+
+# Heuristic: anything over this many chars of input → Opus (deeper reasoning).
+COMPLEX_CHAR_THRESHOLD = 4000
 
 
 class CaseInput(BaseModel):
@@ -22,6 +31,7 @@ class CaseInput(BaseModel):
     claim_amount: Optional[float] = 0
     transcript: Optional[str] = ""
     notes: Optional[str] = ""
+    documents_summary: Optional[str] = ""   # joined ai_summary of docs in this case
 
 
 class AnalyzeIn(BaseModel):
@@ -31,23 +41,35 @@ class AnalyzeIn(BaseModel):
 
 
 def _case_block(case: CaseInput) -> str:
-    return f"""ชื่อคดี: {case.title or "—"}
-ประเภทคดี: {case.case_type or "—"}
-ศาล: {case.court or "—"}
-โจทก์: {case.plaintiff_name or "—"}
-จำเลย: {case.defendant_name or "—"}
-ลูกความของเรา: {"ฝ่ายโจทก์" if case.our_client == "plaintiff" else "ฝ่ายจำเลย"}
-ทุนทรัพย์: {case.claim_amount or 0:,.0f} บาท
-รายละเอียด/คำบอกเล่า: {case.transcript or case.notes or "—"}"""
+    plaintiff = case.plaintiff_name or "(ยังไม่ระบุ)"
+    defendant = case.defendant_name or "(ยังไม่ระบุ)"
+    our = "ฝ่ายโจทก์" if case.our_client == "plaintiff" else ("ฝ่ายจำเลย" if case.our_client == "defendant" else "ทั้งสองฝ่าย")
+    block = (
+        f"ชื่อคดี: {case.title or '—'}\n"
+        f"ประเภทคดี: {case.case_type or '—'}\n"
+        f"ศาล: {case.court or '—'}\n"
+        f"โจทก์: {plaintiff}\n"
+        f"จำเลย: {defendant}\n"
+        f"ลูกความที่เรารับ: {our}\n"
+        f"ทุนทรัพย์: {case.claim_amount or 0:,.0f} บาท\n"
+        f"รายละเอียด/คำบอกเล่า:\n{case.transcript or case.notes or '—'}"
+    )
+    if case.documents_summary:
+        block += f"\n\n== สรุปเอกสารในคดี ==\n{case.documents_summary}"
+    return block
 
 
 def _perspective_label(p: str) -> str:
     return {"plaintiff": "ฝ่ายโจทก์", "defendant": "ฝ่ายจำเลย"}.get(p, "ทั้งสองฝ่าย")
 
 
-async def _claude_call(prompt: str, max_tokens: int = 1500) -> str:
+def _pick_model(input_text: str) -> str:
+    return OPUS if len(input_text) >= COMPLEX_CHAR_THRESHOLD else SONNET
+
+
+async def _claude_call(prompt: str, model: str, max_tokens: int = 4000) -> str:
     msg = await _claude.messages.create(
-        model="claude-sonnet-4-6",
+        model=model,
         max_tokens=max_tokens,
         temperature=0.3,
         messages=[{"role": "user", "content": prompt}],
@@ -62,130 +84,218 @@ async def legal_analyze(
 ):
     case_block = _case_block(payload.case)
     p_label = _perspective_label(payload.perspective)
+    plaintiff = payload.case.plaintiff_name or "(โจทก์ยังไม่ระบุ)"
+    defendant = payload.case.defendant_name or "(จำเลยยังไม่ระบุ)"
 
-    main_prompt = f"""คุณคือทนายความไทยผู้เชี่ยวชาญ วิเคราะห์คดีต่อไปนี้จากมุมมอง{p_label}
+    main_prompt = f"""คุณคือทนายความไทยอาวุโสผู้เชี่ยวชาญทุกแขนงกฎหมาย ระดับเนติบัณฑิตและที่ปรึกษากฎหมายของสำนักงานชั้นนำ
+วิเคราะห์คดีต่อไปนี้ให้ละเอียดที่สุดเท่าที่ทำได้ — ให้คำตอบเชิงลึก ครบถ้วน ครอบคลุม โดยอ้างอิงตัวบทจริง
 
 == ข้อมูลคดี ==
 {case_block}
 
-ตอบในหัวข้อต่อไปนี้ ด้วยภาษาไทย กระชับและตรงประเด็น:
+== มุมมองที่ต้องวิเคราะห์ ==
+{p_label} (ในคดีนี้: โจทก์ = {plaintiff} / จำเลย = {defendant})
 
-🔍 **วิเคราะห์คดีภาพรวม — {p_label}**
+== ข้อกำหนดสำคัญ ==
+1. **ระบุชื่อโจทก์และจำเลยจริงในการวิเคราะห์ทุกครั้ง** — ห้ามใช้คำว่า "โจทก์" หรือ "จำเลย" ลอยๆ ต้องเขียน "{plaintiff}" หรือ "{defendant}" ตรงๆ
+2. ตอบเป็นภาษาไทยทางกฎหมาย กระชับแต่ครบถ้วน
+3. ตอบทุกหัวข้อข้างล่างนี้แบบละเอียดสูงสุด — ห้ามละเว้นหัวข้อใด
+4. ใช้ markdown: **bold**, bullet `•`, ลำดับเลข `1.`
 
-**ข้อเท็จจริงสำคัญ** (3-4 ข้อ)
+== โครงสร้างคำตอบที่ต้องการ ==
 
-**กฎหมายที่เกี่ยวข้อง**
-- อ้างอิงมาตรา/พรบ. ที่เกี่ยวข้อง 3-5 ข้อ พร้อมเลขมาตรา
+🔍 **บทสรุปผู้บริหาร (Executive Summary)**
+สรุปคดีทั้งหมดในรูปแบบที่ผู้บริหารหรือลูกความเข้าใจในนาทีเดียว — ต้องครอบคลุม:
+- คดีคืออะไร เกิดอะไรขึ้น ใครฟ้องใคร ฟ้องอะไร
+- ผลลัพธ์คาดการณ์ + แนวทางสำคัญที่สุด
 
-**โอกาสชนะคดี**
-- ประเมินเป็นเปอร์เซ็นต์: โจทก์ X% / จำเลย Y%
+📚 **ข้อเท็จจริงโดยละเอียด (Detailed Facts)**
+รายงานข้อเท็จจริงของคดีอย่างเป็นระบบ ครบทุกมิติ (อย่างน้อย 8-10 ข้อ พร้อมรายละเอียดเชิงลึก)
 
-**จุดแข็งของคดี**
-- 3-4 ข้อ
+⚖️ **กฎหมายที่เกี่ยวข้อง (Applicable Laws)**
+ระบุมาตรา/พรบ./ประมวลกฎหมายที่เกี่ยวข้องครบทุกข้อ (อย่างน้อย 5-8 ข้อ) พร้อม:
+- เลขมาตราและชื่อกฎหมาย
+- ใจความสำคัญของมาตรา (สรุปเป็นภาษาคนเข้าใจง่าย)
+- การประยุกต์ใช้กับข้อเท็จจริงในคดีนี้
+อ้างอิงคำพิพากษาฎีกาที่เกี่ยวข้องด้วย (ถ้านึกออก) อย่างน้อย 2-3 ฎีกา
 
-**จุดอ่อน / ความเสี่ยง**
-- 2-3 ข้อ
+🎯 **ประเมินโอกาสชนะคดี (Probability of Success)**
+- ฝ่าย{plaintiff} (โจทก์): X%
+- ฝ่าย{defendant} (จำเลย): Y%
+- เหตุผลประกอบการประเมินอย่างละเอียด
 
-**กลยุทธ์แนะนำ**
-1. ระยะสั้น (0-30 วัน):
-2. ระยะกลาง (30-90 วัน):
-3. ระยะยาว:
+💪 **จุดแข็งของฝ่าย{p_label}**
+อย่างน้อย 5 ข้อพร้อมเหตุผลสนับสนุน
 
-**ประเมินความเสี่ยง**
-- สูง 🔴: ...
-- กลาง 🟡: ...
-- ต่ำ 🟢: ...
+🛑 **จุดอ่อน/ความเสี่ยงของฝ่าย{p_label}**
+อย่างน้อย 4 ข้อพร้อมแนวทางบรรเทาความเสี่ยง
 
-**Timeline สำคัญ**
-- (ระบุช่วงเวลา + เหตุการณ์ที่คาดว่าจะเกิด)
+🛡️ **แนวทางการต่อสู้ขั้นสุด (Ultimate Defense/Prosecution Strategy)**
+นี่คือหัวใจของรายงาน — ต้องละเอียดที่สุด:
 
-ลงท้ายด้วยข้อความ: "⚠️ ผลการวิเคราะห์นี้เป็นการประมาณการเบื้องต้น ต้องผ่านการพิจารณาจากทนายความก่อนนำไปใช้"
+**ก่อนยื่น/ก่อนขึ้นศาล:**
+- หลักฐานที่ต้องเตรียม (รายการละเอียด)
+- พยานบุคคลที่ต้องเชิญ + ประเด็นที่จะถาม
+- เอกสารที่ต้องร่าง
+
+**ในชั้นศาล:**
+- แนวประเด็นข้อสู้คดี (legal arguments) ทุกประเด็น
+- แนวซักค้านพยานฝ่ายตรงข้าม
+- การยกข้อต่อสู้ทางกฎหมาย (เช่น อายุความ, อำนาจฟ้อง, ความชอบด้วยกฎหมาย)
+
+**ข้อต่อรอง/ทางออกทางเลือก:**
+- ประนีประนอม
+- ไกล่เกลี่ย
+- แนวทางลด/หยุดความเสียหาย
+
+📅 **Timeline เชิงปฏิบัติ (Action Timeline)**
+ระบุระยะเวลาแต่ละขั้นตอนพร้อมรายละเอียด:
+- ทันที (0-7 วัน)
+- ระยะสั้น (1-4 สัปดาห์)
+- ระยะกลาง (1-3 เดือน)
+- ระยะยาว (3+ เดือนถึงคำพิพากษา)
+
+💰 **ประเมินค่าใช้จ่ายและเวลา**
+- ค่าฤชาธรรมเนียมศาล
+- ค่าทนาย (ประมาณการ)
+- ระยะเวลารวมที่คาดว่าใช้
+
+⚠️ **ความเสี่ยงรอบด้าน**
+- เสี่ยงต่อการขาดอายุความ
+- เสี่ยงต่อค่าฤชาธรรมเนียมที่อาจเสียเพิ่ม
+- เสี่ยงทางชื่อเสียง/ผลกระทบทางธุรกิจ
+- เสี่ยงทางอาญา/วินัย (ถ้ามี)
+
+🎓 **คำแนะนำทางยุทธวิธี (Tactical Recommendations)**
+จากประสบการณ์ของทนายอาวุโส — Tips & Tricks ที่อาจชี้ขาดคดี อย่างน้อย 5 ข้อ
+
+📝 **บทสรุปและขั้นตอนถัดไป**
+สรุปทุกประเด็น + Action Items ที่ต้องทำต่อทันที
+
+ลงท้ายด้วย:
+"⚠️ ผลการวิเคราะห์นี้ใช้ AI ขั้นสูงและฐานความรู้กฎหมายไทย แต่เพื่อความปลอดภัยสูงสุด ทนายความที่รับคดีต้องตรวจสอบและปรับใช้ตามรูปคดีจริงก่อนใช้งาน"
 """
 
-    try:
-        analysis_text = await _claude_call(main_prompt, max_tokens=2200)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Claude analysis failed: {str(e)}")
+    chosen_model = _pick_model(case_block)
 
+    try:
+        analysis_text = await _claude_call(main_prompt, chosen_model, max_tokens=8000)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Claude analysis failed ({chosen_model}): {str(e)}")
+
+    # Polish through GPT-4o (preserves all content, refines wording)
+    polished = await polish_thai_legal(analysis_text)
+
+    # Document drafts in parallel
     documents: dict[str, str] = {}
-    for doc_type in payload.document_types or []:
-        try:
-            documents[doc_type] = await _draft_document(doc_type, payload.case)
-        except Exception as e:
-            documents[doc_type] = f"⚠️ ไม่สามารถร่างเอกสารได้: {str(e)}"
+    if payload.document_types:
+        results = await asyncio.gather(
+            *[_draft_document(t, payload.case, chosen_model) for t in payload.document_types],
+            return_exceptions=True,
+        )
+        for t, res in zip(payload.document_types, results):
+            if isinstance(res, Exception):
+                documents[t] = f"⚠️ ไม่สามารถร่างเอกสารได้: {str(res)}"
+            else:
+                documents[t] = res
 
     return {
-        "analysis": analysis_text,
+        "analysis": polished,
+        "model_used": chosen_model,
         "documents": documents,
     }
 
 
-async def _draft_document(doc_type: str, case: CaseInput) -> str:
+async def _draft_document(doc_type: str, case: CaseInput, model: str) -> str:
     case_block = _case_block(case)
+    plaintiff = case.plaintiff_name or "(โจทก์ยังไม่ระบุ)"
+    defendant = case.defendant_name or "(จำเลยยังไม่ระบุ)"
+    court = case.court or "(ศาลยังไม่ระบุ)"
 
     if doc_type == "complaint":
-        prompt = f"""คุณคือทนายความไทย ร่าง **คำฟ้อง** สำหรับคดีต่อไปนี้
+        prompt = f"""คุณคือทนายความไทย ร่าง **คำฟ้อง** ให้ครบถ้วนสมบูรณ์ที่สุด ใช้ในศาลได้จริง
 
+ข้อมูลคดี:
 {case_block}
 
-ร่างคำฟ้องในรูปแบบที่ใช้ในศาลไทย ประกอบด้วย:
+ใช้ชื่อจริงของคู่ความในคำฟ้อง:
+- โจทก์: {plaintiff}
+- จำเลย: {defendant}
+- ศาล: {court}
+
+ร่างคำฟ้องที่มี:
 **คำฟ้อง**
 
-ข้าพเจ้า [โจทก์] ขอฟ้อง [จำเลย] ต่อ[ศาล]
+ข้าพเจ้า {plaintiff} โจทก์ ขอฟ้อง {defendant} จำเลย
+ต่อ{court}
 
 **ข้อ 1. ข้อเท็จจริง**
-(ระบุข้อเท็จจริงพื้นฐาน 3-5 บรรทัด)
+(เขียนข้อเท็จจริงเชิงลึกอย่างน้อย 5 ย่อหน้า ครอบคลุมที่มาที่ไปของคดี)
 
 **ข้อ 2. มูลเหตุฟ้อง**
-(พฤติการณ์ของจำเลยและความเสียหาย)
+(พฤติการณ์ของจำเลย {defendant} โดยละเอียด + ความเสียหายที่เกิดต่อ {plaintiff})
 
-**ข้อ 3. คำขอท้ายฟ้อง**
-1. (ขอให้จำเลย...)
-2. (ขอให้จำเลย...)
+**ข้อ 3. กฎหมายที่อ้างอิง**
+(มาตราที่อ้างอิงพร้อมเหตุผลประกอบ)
 
-ลงท้ายด้วย: "⚠ ร่างนี้เป็นตัวอย่าง ต้องให้ทนายความตรวจสอบก่อนยื่นศาล"
+**ข้อ 4. คำขอท้ายฟ้อง**
+ลำดับเลขครบทุกคำขอ
+
+ลงท้าย: "⚠ ร่างคำฟ้องนี้ผ่าน AI ต้องให้ทนายความตรวจและปรับสำนวนก่อนยื่นศาล"
+
+ตอบยาวพอที่จะใช้งานได้จริง ใช้ชื่อจริงของคู่ความตลอดทั้งเอกสาร ห้ามใช้ placeholder
 """
     elif doc_type == "defense":
-        prompt = f"""คุณคือทนายความไทย ร่าง **คำให้การจำเลย** สำหรับคดีต่อไปนี้
+        prompt = f"""คุณคือทนายความไทย ร่าง **คำให้การจำเลย** ให้ครบถ้วน ใช้ในศาลได้
 
+ข้อมูลคดี:
 {case_block}
 
-ร่างคำให้การประกอบด้วย:
+ใช้ชื่อจริงของคู่ความ:
+- โจทก์: {plaintiff}
+- จำเลย: {defendant}
+
+ร่างคำให้การที่มีโครงสร้าง:
 **คำให้การจำเลย**
 
-ข้าพเจ้า [จำเลย] ขอให้การต่อสู้คดีดังนี้
+ข้าพเจ้า {defendant} จำเลย ขอให้การต่อสู้คดีดังนี้
 
-**ข้อ 1. ปฏิเสธข้ออ้างโจทก์**
+**ข้อ 1. ปฏิเสธข้ออ้างของ {plaintiff}**
+(เขียนเหตุผลปฏิเสธโดยละเอียด)
 
-**ข้อ 2. ข้อต่อสู้**
-(เช่น โจทก์ไม่มีอำนาจฟ้อง / ขาดอายุความ / ชำระแล้ว)
+**ข้อ 2. ข้อต่อสู้หลัก**
+(แสดงข้อต่อสู้ครบทุกประเด็น เช่น ขาดอายุความ / ไม่มีอำนาจฟ้อง / ชำระแล้ว / ความชอบด้วยกฎหมาย)
 
 **ข้อ 3. คำขอท้ายคำให้การ**
+(ขอให้ยกฟ้อง + เรียกร้องค่าฤชาธรรมเนียม)
 
-ลงท้ายด้วย: "⚠ ร่างนี้เป็นตัวอย่าง ต้องให้ทนายความตรวจสอบก่อนยื่นศาล"
+ใช้ชื่อจริงตลอด ห้ามใช้ placeholder
+ลงท้าย: "⚠ ร่างนี้ต้องให้ทนายความตรวจและปรับสำนวนก่อนยื่นศาล"
 """
     elif doc_type == "contract":
-        prompt = f"""คุณคือทนายความไทย ตรวจสอบ **ความเสี่ยงสัญญา** ในคดีต่อไปนี้
+        prompt = f"""คุณคือทนายความไทย ตรวจสอบ **ความเสี่ยงสัญญา** ในคดี
 
+ข้อมูลคดี:
 {case_block}
+คู่ความ: {plaintiff} (โจทก์) vs {defendant} (จำเลย)
 
-ออกรายงานในรูปแบบ:
+ออกรายงาน:
 **รายงานตรวจสัญญา / ความเสี่ยง**
 
-**Clause ที่ต้องระวัง 🔴**
-- ข้อ X — ...
+**🔴 Clause ที่ต้องระวัง (อย่างน้อย 4-5 จุด)**
 
-**ความเสี่ยงโมฆะ 🟡**
-- ข้อ Y — ...
+**🟡 ความเสี่ยงโมฆะ/บกพร่อง (อย่างน้อย 3 จุด)**
 
-**ข้อแนะนำ**
-1.
-2.
-3.
+**🟢 จุดแข็งที่ต้องรักษา**
 
-ลงท้ายด้วย: "⚠ ต้องผ่านการพิจารณาจากทนายความก่อนนำไปใช้"
+**📋 ข้อแนะนำในการเจรจา/แก้ไข (อย่างน้อย 5 ข้อ)**
+
+ใช้ชื่อจริงคู่สัญญาตลอด
+ลงท้าย: "⚠ ต้องผ่านการพิจารณาจากทนายความก่อนนำไปใช้"
 """
     else:
         return f"ประเภทเอกสารไม่รองรับ: {doc_type}"
 
-    return await _claude_call(prompt, max_tokens=1500)
+    raw = await _claude_call(prompt, model, max_tokens=4000)
+    polished = await polish_thai_legal(raw)
+    return polished
