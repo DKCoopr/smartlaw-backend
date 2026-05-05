@@ -48,7 +48,9 @@ async def upload_document(
     file_ext = ALLOWED_TYPES[file.content_type]
     original_name = file.filename or f"upload.{file_ext}"
     label = doc_label or original_name
-    storage_path = f"{user_id}/{uuid.uuid4()}_{original_name}"
+    # Use ASCII-only storage key (Supabase Storage rejects non-ASCII).
+    # Original name is preserved in the documents table.
+    storage_path = f"{user_id}/{uuid.uuid4()}.{file_ext}"
 
     db = get_supabase()
 
