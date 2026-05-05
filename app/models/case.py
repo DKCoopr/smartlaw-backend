@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
-from datetime import datetime
+from typing import Optional, List, Any
+from datetime import datetime, date
 from enum import Enum
 
 
@@ -19,9 +19,8 @@ class RiskLevel(str, Enum):
 # ── Input: raw transcript from Whisper ──────────────────────────────────────
 
 class TranscribeRequest(BaseModel):
-    """Sent from frontend after recording stops"""
-    audio_base64: Optional[str] = None   # for small files sent inline
-    language: str = "th"                  # Thai by default
+    audio_base64: Optional[str] = None
+    language: str = "th"
 
 
 class TranscribeResponse(BaseModel):
@@ -40,7 +39,6 @@ class AnalyzeRequest(BaseModel):
 # ── The form data structure (mirrors frontend fd state) ──────────────────────
 
 class FormData(BaseModel):
-    # Reporter info
     name: str = ""
     age: str = ""
     id_card: str = ""
@@ -49,17 +47,14 @@ class FormData(BaseModel):
     phone: str = ""
     station: str = "สมาร์ทลอว์"
 
-    # Incident
     incident_date: str = ""
     incident_time: str = ""
     location: str = ""
 
-    # Details
     body: str = ""
     charge: str = ""
     intent: IntentEnum = IntentEnum.prosecute
 
-    # AI analysis (filled by pipeline)
     legal: str = ""
     steps: List[str] = []
     risk: Optional[RiskLevel] = None
@@ -67,11 +62,11 @@ class FormData(BaseModel):
 
 class AnalyzeResponse(BaseModel):
     form_data: FormData
-    raw_extraction: dict        # Gemini output
-    legal_analysis: str         # Claude output
-    formal_body: str            # GPT-4o output
+    raw_extraction: dict
+    legal_analysis: str
+    formal_body: str
     verification_passed: bool
-    confidence_score: float     # 0.0 – 1.0
+    confidence_score: float
     processing_ms: int
 
 
@@ -79,19 +74,41 @@ class AnalyzeResponse(BaseModel):
 
 class CaseCreate(BaseModel):
     title: str
-    transcript: str
-    form_data: FormData
-    analysis: Optional[AnalyzeResponse] = None
+    case_type: Optional[str] = "แพ่ง"
+    court: Optional[str] = ""
+    plaintiff_name: Optional[str] = ""
+    defendant_name: Optional[str] = ""
+    our_client: Optional[str] = "plaintiff"
+    claim_amount: Optional[float] = 0
+    assigned_lawyer: Optional[str] = ""
+    next_hearing: Optional[str] = None
+    status: Optional[str] = "active"
+    transcript: Optional[str] = ""
+    form_data: Optional[FormData] = None
+    analysis: Optional[Any] = None
+    ai_strength_score: Optional[int] = None
 
 
 class CaseOut(BaseModel):
     id: str
+    user_id: str
     title: str
     status: str
+    case_number: Optional[str] = None
+    case_type: Optional[str] = None
+    court: Optional[str] = None
+    plaintiff_name: Optional[str] = None
+    defendant_name: Optional[str] = None
+    our_client: Optional[str] = None
+    claim_amount: Optional[float] = 0
+    ai_strength_score: Optional[int] = None
+    assigned_lawyer: Optional[str] = None
+    next_hearing: Optional[date] = None
     created_at: datetime
     updated_at: datetime
-    form_data: FormData
-    user_id: str
+    form_data: Optional[Any] = None
+    transcript: Optional[str] = None
+    analysis: Optional[Any] = None
 
 
 class CaseListOut(BaseModel):
@@ -104,4 +121,4 @@ class CaseListOut(BaseModel):
 class DocumentRequest(BaseModel):
     case_id: str
     form_data: FormData
-    document_type: str = "police_daily_log"   # police_daily_log | complaint | power_of_attorney
+    document_type: str = "police_daily_log"
