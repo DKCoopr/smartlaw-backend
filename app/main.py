@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.config import get_settings
-from app.routes import transcribe, analyze, cases, documents
+from app.routes import transcribe, analyze, cases, documents, billings, transactions, legal
 
 settings = get_settings()
 
@@ -55,6 +55,9 @@ app.include_router(transcribe.router)
 app.include_router(analyze.router)
 app.include_router(cases.router)
 app.include_router(documents.router)
+app.include_router(billings.router)
+app.include_router(transactions.router)
+app.include_router(legal.router)
 
 
 # ── Health check ─────────────────────────────────────────────────────────────
