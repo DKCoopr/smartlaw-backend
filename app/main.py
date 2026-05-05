@@ -14,7 +14,10 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
+    import os
     print("🚀 SmartLaw API starting up...")
+    print(f"   RAW APP_ENV from os.environ: {os.environ.get('APP_ENV', 'NOT_FOUND')}")
+    print(f"   RAW ANTHROPIC from os.environ: {os.environ.get('ANTHROPIC_API_KEY', 'NOT_FOUND')[:10] if os.environ.get('ANTHROPIC_API_KEY') else 'NOT_FOUND'}")
     print(f"   Environment: {settings.app_env}")
     print(f"   Supabase: {'✅ configured' if settings.supabase_url else '❌ missing'}")
     print(f"   OpenAI:   {'✅ configured' if settings.openai_api_key else '❌ missing'}")
