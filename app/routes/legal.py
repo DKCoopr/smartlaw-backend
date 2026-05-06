@@ -1,7 +1,9 @@
 """Legal analysis — Claude reads PDFs natively (no Gemini middleman)."""
 import asyncio
 import base64
-from typing import List, Optional
+import time
+import uuid
+from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 import anthropic
@@ -11,6 +13,20 @@ from app.database import get_supabase
 from app.services.documents import ocr_image
 
 router = APIRouter(prefix="/api/legal", tags=["legal"])
+
+# ── In-memory job store for async analysis ────────────────────────────────────
+# Each entry: {status: "pending"|"complete"|"failed", started_at, finished_at?,
+#              user_id, result?, error?}
+# Jobs older than 1 hour are auto-evicted on access.
+_jobs: Dict[str, Dict[str, Any]] = {}
+_JOB_TTL_SECONDS = 3600
+
+
+def _evict_stale_jobs():
+    cutoff = time.time() - _JOB_TTL_SECONDS
+    stale = [k for k, j in _jobs.items() if j.get("started_at", 0) < cutoff]
+    for k in stale:
+        _jobs.pop(k, None)
 
 settings = get_settings()
 _claude = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
@@ -496,11 +512,8 @@ def _analysis_prompt(case: CaseInput, perspective: str, has_attachments: bool) -
 """
 
 
-@router.post("/analyze")
-async def legal_analyze(
-    payload: AnalyzeIn,
-    user_id: str = Depends(get_current_user_id),
-):
+async def _do_analyze(payload: "AnalyzeIn", user_id: str) -> dict:
+    """Run the actual analysis. Pulled out so the job runner can call it."""
     # 1. Pull actual case PDFs from Supabase storage (skip Gemini summary)
     attachments, debug = ([], {"case_id": None})
     if payload.case_id:
@@ -514,10 +527,7 @@ async def legal_analyze(
     # 3. Run Claude with PDFs as document blocks + final prompt
     prompt = _analysis_prompt(payload.case, payload.perspective, has_attachments=bool(attachments))
 
-    try:
-        analysis_text = await _claude_call(prompt, chosen_model, attachments, max_tokens=32000)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Analysis failed ({chosen_model}): {str(e)}")
+    analysis_text = await _claude_call(prompt, chosen_model, attachments, max_tokens=32000)
 
     # 4. Document drafts (in parallel, also with attachments for context)
     documents: dict[str, str] = {}
@@ -536,6 +546,70 @@ async def legal_analyze(
         "attachments_count": len(attachments),
         "debug": debug,
         "documents": documents,
+    }
+
+
+async def _run_job(job_id: str, payload: "AnalyzeIn", user_id: str):
+    """Background worker — writes back into _jobs[job_id]."""
+    try:
+        result = await _do_analyze(payload, user_id)
+        _jobs[job_id] = {
+            **_jobs.get(job_id, {}),
+            "status": "complete",
+            "finished_at": time.time(),
+            "result": result,
+        }
+    except Exception as e:
+        _jobs[job_id] = {
+            **_jobs.get(job_id, {}),
+            "status": "failed",
+            "finished_at": time.time(),
+            "error": str(e),
+        }
+
+
+@router.post("/analyze")
+async def legal_analyze_start(
+    payload: AnalyzeIn,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Start an analysis job in the background. Returns {job_id} immediately.
+
+    Clients poll GET /api/legal/analyze/jobs/{job_id} for completion.
+    A finished result remains available for ~1 hour after completion.
+    """
+    _evict_stale_jobs()
+    job_id = uuid.uuid4().hex
+    _jobs[job_id] = {
+        "status":     "pending",
+        "started_at": time.time(),
+        "user_id":    user_id,
+    }
+    # asyncio.create_task is sufficient — the analysis is purely async I/O
+    # against Anthropic + Supabase. Survives the request lifecycle.
+    asyncio.create_task(_run_job(job_id, payload, user_id))
+    return {"job_id": job_id, "status": "pending"}
+
+
+@router.get("/analyze/jobs/{job_id}")
+async def legal_analyze_status(
+    job_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Return current status of an analysis job. 404 if unknown / evicted."""
+    _evict_stale_jobs()
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found or expired")
+    if job.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Not your job")
+    return {
+        "job_id":      job_id,
+        "status":      job.get("status"),
+        "started_at":  job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "result":      job.get("result"),
+        "error":       job.get("error"),
     }
 
 
