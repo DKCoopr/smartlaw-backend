@@ -242,7 +242,7 @@ async def _claude_call(prompt: str, model: str, attachments: list[dict], max_tok
         return await _stream(max_tokens)
     except Exception:
         # Retry with smaller token budget
-        return await _stream(16000)
+        return await _stream(min(max_tokens, 24000))
 
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
@@ -515,7 +515,7 @@ async def legal_analyze(
     prompt = _analysis_prompt(payload.case, payload.perspective, has_attachments=bool(attachments))
 
     try:
-        analysis_text = await _claude_call(prompt, chosen_model, attachments, max_tokens=16000)
+        analysis_text = await _claude_call(prompt, chosen_model, attachments, max_tokens=32000)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Analysis failed ({chosen_model}): {str(e)}")
 
@@ -636,4 +636,4 @@ async def _draft_document(doc_type: str, case: CaseInput, model: str, attachment
     else:
         return f"ประเภทเอกสารไม่รองรับ: {doc_type}"
 
-    return await _claude_call(prompt, model, attachments, max_tokens=8192)
+    return await _claude_call(prompt, model, attachments, max_tokens=16000)
