@@ -40,6 +40,7 @@ class AnalyzeIn(BaseModel):
     perspective: str = "both"
     document_types: List[str] = []
     case_id: Optional[str] = None
+    doc_ids: Optional[List[str]] = None    # if set: only analyze these docs (subset)
 
 
 def _case_block(case: CaseInput) -> str:
@@ -75,29 +76,32 @@ def _content_type(file_type: str) -> str:
     }.get((file_type or "").lower(), "application/pdf")
 
 
-async def _load_case_attachments(case_id: str, user_id: str) -> tuple[list[dict], dict]:
+async def _load_case_attachments(case_id: str, user_id: str, doc_ids: Optional[List[str]] = None) -> tuple[list[dict], dict]:
     """Pull case docs from Supabase Storage. Returns (attachments, debug_info).
 
     Routing rules:
     - PDF / TXT  → straight to Claude (Claude reads natively)
     - Images     → run Gemini OCR first → send OCR'd text + image to Claude
-                   (best for handwriting + printed text in photos)
+
+    If doc_ids is provided, only load those specific documents (subset selection).
     """
-    debug = {"case_id": case_id, "user_id": user_id, "rows_found": 0, "loaded": [], "errors": []}
+    debug = {"case_id": case_id, "user_id": user_id, "rows_found": 0, "loaded": [], "errors": [], "subset": bool(doc_ids)}
     if not case_id:
         debug["errors"].append("no case_id provided")
         return [], debug
 
     db = get_supabase()
     try:
-        rows = (
+        q = (
             db.table("documents")
             .select("*")
             .eq("case_id", case_id)
             .eq("user_id", user_id)
             .order("created_at", desc=False)
-            .execute()
         )
+        if doc_ids:
+            q = q.in_("id", doc_ids)
+        rows = q.execute()
     except Exception as e:
         debug["errors"].append(f"db query failed: {e}")
         print(f"[legal/analyze] DB query failed for case_id={case_id}: {e}")
@@ -105,7 +109,10 @@ async def _load_case_attachments(case_id: str, user_id: str) -> tuple[list[dict]
 
     rows_data = rows.data or []
     debug["rows_found"] = len(rows_data)
-    print(f"[legal/analyze] case_id={case_id} → {len(rows_data)} document rows")
+    if doc_ids:
+        print(f"[legal/analyze] case_id={case_id} subset={len(doc_ids)} → {len(rows_data)} document rows")
+    else:
+        print(f"[legal/analyze] case_id={case_id} → {len(rows_data)} document rows")
 
     out = []
     total_bytes = 0
@@ -483,7 +490,7 @@ async def legal_analyze(
     # 1. Pull actual case PDFs from Supabase storage (skip Gemini summary)
     attachments, debug = ([], {"case_id": None})
     if payload.case_id:
-        attachments, debug = await _load_case_attachments(payload.case_id, user_id)
+        attachments, debug = await _load_case_attachments(payload.case_id, user_id, payload.doc_ids)
 
     print(f"[legal/analyze] case_id={payload.case_id} attachments={len(attachments)} bytes={sum(len(a['bytes']) for a in attachments)}")
 
