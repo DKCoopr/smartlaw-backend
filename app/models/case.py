@@ -23,10 +23,21 @@ class TranscribeRequest(BaseModel):
     language: str = "th"
 
 
+class SpeakerTurn(BaseModel):
+    speaker: str           # "officer" | "complainant"
+    text: str
+    start: float
+    end: float
+
+
 class TranscribeResponse(BaseModel):
     transcript: str
     duration_seconds: float
     language_detected: str
+    # Diarization (when available — empty list / empty string for very short audio)
+    turns: list[SpeakerTurn] = []
+    tagged_transcript: str = ""
+    complainant_text: str = ""
 
 
 # ── Input: run the full AI pipeline on a transcript ──────────────────────────

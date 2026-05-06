@@ -28,14 +28,32 @@ async def transcribe_audio(audio_bytes: bytes, filename: str = "audio.webm") -> 
                 model="whisper-1",          # whisper-1 = Whisper Large v3 via API
                 file=audio_file,
                 language="th",              # Force Thai — faster and more accurate
-                response_format="verbose_json",   # gives us duration + language
+                response_format="verbose_json",   # gives us duration + language + segments
                 prompt="บันทึกประจำวันตำรวจ แจ้งความ ผู้เสียหาย ผู้ต้องหา",  # Thai legal context hint
             )
 
+        # Pull segments — each is one Whisper-detected utterance with timing.
+        # Used downstream for speaker diarization.
+        raw_segments = getattr(response, "segments", []) or []
+        segments = []
+        for seg in raw_segments:
+            # Library returns either pydantic model or dict depending on SDK version
+            get = (lambda k: getattr(seg, k, None)) if hasattr(seg, "text") else (lambda k: seg.get(k))
+            text = (get("text") or "").strip()
+            if not text:
+                continue
+            segments.append({
+                "id":    get("id"),
+                "start": float(get("start") or 0.0),
+                "end":   float(get("end") or 0.0),
+                "text":  text,
+            })
+
         return {
-            "transcript": response.text,
-            "duration_seconds": getattr(response, "duration", 0.0),
+            "transcript":        response.text,
+            "duration_seconds":  getattr(response, "duration", 0.0),
             "language_detected": getattr(response, "language", "th"),
+            "segments":          segments,
         }
     finally:
         os.unlink(tmp_path)   # Always clean up temp file
