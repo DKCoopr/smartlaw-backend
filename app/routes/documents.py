@@ -36,6 +36,7 @@ async def upload_document(
     file: UploadFile = File(...),
     case_id: Optional[str] = Form(None),
     doc_label: Optional[str] = Form(None),
+    folder: Optional[str] = Form(None),
     user_id: str = Depends(get_current_user_id),
 ):
     if file.content_type not in ALLOWED_TYPES:
@@ -80,6 +81,7 @@ async def upload_document(
         "storage_path":  storage_path,
         "is_processed":  bool(ai_summary),
         "ai_summary":    ai_summary or None,
+        "folder":        (folder or None),
     }
 
     try:
@@ -132,6 +134,53 @@ async def get_document_url(
         return {"url": signed.get("signedURL") or signed.get("signed_url") or signed}
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/documents/{doc_id}")
+async def update_document(
+    doc_id: str,
+    updates: dict,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Update document metadata: folder, doc_label, doc_category."""
+    allowed = {"folder", "doc_label", "doc_category"}
+    clean = {k: (v if v != "" else None) for k, v in updates.items() if k in allowed}
+    if not clean:
+        raise HTTPException(status_code=400, detail="No valid fields")
+    db = get_supabase()
+    try:
+        response = db.table("documents").update(clean).eq("id", doc_id).eq("user_id", user_id).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return response.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/documents/folder/rename")
+async def rename_folder(
+    payload: dict,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Bulk rename a folder: { case_id, old_name, new_name }."""
+    case_id = payload.get("case_id")
+    old_name = payload.get("old_name")
+    new_name = payload.get("new_name")
+    if not case_id or old_name is None:
+        raise HTTPException(status_code=400, detail="case_id and old_name required")
+    db = get_supabase()
+    try:
+        q = db.table("documents").update({"folder": (new_name or None)}).eq("user_id", user_id).eq("case_id", case_id)
+        if old_name:
+            q = q.eq("folder", old_name)
+        else:
+            q = q.is_("folder", "null")
+        response = q.execute()
+        return {"updated": len(response.data or [])}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
