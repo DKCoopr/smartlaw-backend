@@ -30,3 +30,6 @@ pydub==0.25.1
 
 # Utilities
 orjson==3.10.3
+
+# Document export (DOCX)
+python-docx==1.1.2
