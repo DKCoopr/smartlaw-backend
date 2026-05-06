@@ -27,12 +27,19 @@ async def transcribe_file(
     [ตำรวจ] or [ผู้ร้องทุกข์] so the form-extraction pipeline can
     use only the complainant's narration.
     """
-    # Validate file type
-    allowed_types = ["audio/webm", "audio/mp4", "audio/wav", "audio/mpeg", "audio/m4a", "video/webm"]
-    if file.content_type not in allowed_types:
+    # Validate file type. Browsers may send content-type with codec params
+    # ("audio/webm;codecs=opus"), so compare on the bare MIME type.
+    raw_ct = (file.content_type or "").lower()
+    bare_ct = raw_ct.split(";", 1)[0].strip()
+    allowed_types = {
+        "audio/webm", "audio/mp4", "audio/x-m4a", "audio/m4a",
+        "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp3",
+        "audio/ogg", "audio/x-ogg", "video/webm", "video/mp4",
+    }
+    if bare_ct not in allowed_types:
         raise HTTPException(
             status_code=415,
-            detail=f"Unsupported audio format: {file.content_type}. Use webm, mp4, wav, or mp3.",
+            detail=f"Unsupported audio format: {raw_ct}. Use webm, mp4, m4a, wav, mp3, or ogg.",
         )
 
     # Validate file size
@@ -42,6 +49,11 @@ async def transcribe_file(
         raise HTTPException(
             status_code=413,
             detail=f"Audio file too large. Maximum {settings.max_audio_mb}MB.",
+        )
+    if len(audio_bytes) < 1024:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Audio file too small ({len(audio_bytes)} bytes). Recording probably empty — try again.",
         )
 
     try:
