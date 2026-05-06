@@ -62,3 +62,37 @@ async def summarize_document(file_bytes: bytes, mime_type: str) -> str:
         return (response.text or "").strip()
     except Exception as e:
         return f""
+
+
+# ── OCR-only mode: extract verbatim text without analyzing ───────────────────
+
+OCR_PROMPT = """ทำหน้าที่เป็น OCR เท่านั้น — อ่านข้อความทั้งหมดในภาพให้ครบ ห้ามวิเคราะห์ ห้ามสรุป ห้ามตัดทอน
+
+กฎ:
+1. ดึงข้อความทุกตัวอักษรในภาพ — ทั้งพิมพ์และเขียนด้วยลายมือ
+2. คงรูปแบบเดิม — ย่อหน้า เลขข้อ ตัวเอน ตัวหนา ตำแหน่ง บรรทัด
+3. ถ้ามีตาราง — เขียนเป็น markdown table
+4. ถ้าอ่านไม่ออกบางส่วน — ใส่ [อ่านไม่ออก] ตรงนั้น แทนการเดา
+5. ถ้ามีตัวเลข วันที่ ลายเซ็น ตราประทับ — บันทึกตามที่เห็นทุกตัว
+6. ถ้าหลายภาพต่อเนื่องกัน — แยกแต่ละหน้าด้วย "--- หน้าถัดไป ---"
+
+ตอบเฉพาะข้อความที่อ่านได้จากภาพ ห้ามมีคำอธิบายอื่น ห้ามมีคำเริ่ม "นี่คือ..." หรือ "ข้อความในภาพคือ..."""
+
+
+async def ocr_image(file_bytes: bytes, mime_type: str) -> str:
+    """
+    Extract verbatim text from image (handwriting + printed). No analysis.
+    Used to feed Claude with full text content from scanned/photographed documents.
+    """
+    if not mime_type.startswith("image/"):
+        return ""
+    if len(file_bytes) > MAX_INLINE_BYTES:
+        return ""
+    try:
+        response = await _model.generate_content_async([
+            {"mime_type": mime_type, "data": file_bytes},
+            OCR_PROMPT,
+        ])
+        return (response.text or "").strip()
+    except Exception:
+        return ""
