@@ -1,5 +1,8 @@
-"""Document AI: extract summary from PDF/image/DOCX using Gemini."""
+"""Document AI: extract summary from PDF/image/DOCX/DOC using Gemini."""
 import io
+import shutil
+import subprocess
+import tempfile
 import google.generativeai as genai
 from app.config import get_settings
 
@@ -10,6 +13,47 @@ genai.configure(api_key=settings.google_api_key)
 _model = genai.GenerativeModel("gemini-1.5-pro-latest")
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+DOC_MIME  = "application/msword"
+
+
+def _extract_doc_text(file_bytes: bytes) -> str:
+    """Pull text out of a legacy .doc (Word binary) file. Tries antiword
+    first, then catdoc as fallback. Both are installed via Dockerfile.
+    Returns "" on any failure (best-effort, never raises)."""
+    if not file_bytes:
+        return ""
+    # Write bytes to a temp file so the CLI tools can read by path
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".doc", delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+    except Exception:
+        return ""
+
+    try:
+        for tool in ("antiword", "catdoc"):
+            if not shutil.which(tool):
+                continue
+            try:
+                # Both tools print plain text to stdout when given a path
+                result = subprocess.run(
+                    [tool, tmp_path],
+                    capture_output=True,
+                    timeout=30,
+                )
+                if result.returncode == 0:
+                    text = (result.stdout or b"").decode("utf-8", errors="replace").strip()
+                    if text:
+                        return text
+            except Exception:
+                continue
+        return ""
+    finally:
+        try:
+            import os
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
 def _extract_docx_text(file_bytes: bytes) -> str:
@@ -86,9 +130,10 @@ async def summarize_document(file_bytes: bytes, mime_type: str) -> str:
     if len(file_bytes) > MAX_INLINE_BYTES:
         return ""
 
-    # DOCX path: extract text → call Gemini as text/plain
-    if mime_type == DOCX_MIME:
-        text = _extract_docx_text(file_bytes)
+    # DOCX / DOC path: extract text → call Gemini as text/plain
+    # (Gemini cannot ingest these formats inline)
+    if mime_type in (DOCX_MIME, DOC_MIME):
+        text = _extract_docx_text(file_bytes) if mime_type == DOCX_MIME else _extract_doc_text(file_bytes)
         if not text:
             return ""
         try:

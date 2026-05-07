@@ -1,8 +1,13 @@
 FROM python:3.11-slim
 
-# Install system dependencies (for pydub audio processing)
+# Install system dependencies:
+#   ffmpeg   → pydub audio processing
+#   antiword → extract text from legacy .doc files (Word binary format)
+#   catdoc   → fallback when antiword can't parse a particular .doc
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    antiword \
+    catdoc \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

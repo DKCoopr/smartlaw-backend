@@ -10,7 +10,7 @@ import anthropic
 from app.auth import get_current_user_id
 from app.config import get_settings
 from app.database import get_supabase
-from app.services.documents import ocr_image, _extract_docx_text, DOCX_MIME
+from app.services.documents import ocr_image, _extract_docx_text, _extract_doc_text, DOCX_MIME, DOC_MIME
 
 router = APIRouter(prefix="/api/legal", tags=["legal"])
 
@@ -276,20 +276,22 @@ async def _load_case_attachments(case_id: str, user_id: str, doc_ids: Optional[L
             "ocr_text": None,
         }
 
-        # DOCX → Claude can't ingest .docx; extract text first and feed as
-        # text/plain. Preserves table content too (see _extract_docx_text).
-        if mime == DOCX_MIME:
+        # DOCX / DOC → Claude can't ingest Word formats; extract text first
+        # and feed as text/plain. DOCX uses python-docx (preserves tables);
+        # legacy .doc uses antiword/catdoc via subprocess (text only).
+        if mime in (DOCX_MIME, DOC_MIME):
             try:
-                text = _extract_docx_text(file_bytes)
+                text = _extract_docx_text(file_bytes) if mime == DOCX_MIME else _extract_doc_text(file_bytes)
+                fmt  = "DOCX" if mime == DOCX_MIME else "DOC"
                 if text:
                     attachment["mime"]  = "text/plain"
                     attachment["bytes"] = text.encode("utf-8")
-                    print(f"[legal/analyze] DOCX→text {name}: {len(text)} chars")
+                    print(f"[legal/analyze] {fmt}→text {name}: {len(text)} chars")
                 else:
-                    debug["errors"].append(f"{name}: DOCX text extract returned empty")
+                    debug["errors"].append(f"{name}: {fmt} text extract returned empty")
                     continue   # skip — nothing useful to send
             except Exception as e:
-                debug["errors"].append(f"{name}: DOCX extract failed — {e}")
+                debug["errors"].append(f"{name}: Word extract failed — {e}")
                 continue
 
         # Image → run OCR first to capture handwriting/text reliably
