@@ -183,6 +183,25 @@ def _is_block_starter(s: str) -> bool:
     return False
 
 
+_NAVY = RGBColor(0x1F, 0x2A, 0x44)
+
+
+def _cover_para(doc: Document, text: str, *, size: int, bold: bool = False,
+                space_before: int = 0, space_after: int = 0,
+                color: RGBColor = _NAVY) -> None:
+    """Add a centered cover paragraph with consistent Thai legal styling."""
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    pf = p.paragraph_format
+    pf.space_before = Pt(space_before)
+    pf.space_after = Pt(space_after)
+    run = p.add_run(text)
+    run.font.name = "Sarabun"
+    run.font.size = Pt(size)
+    run.bold = bold
+    run.font.color.rgb = color
+
+
 def _build_docx(analysis_md: str, meta: CaseMeta) -> bytes:
     """Produce a polished .docx for a legal analysis report."""
     doc = Document()
@@ -192,47 +211,75 @@ def _build_docx(analysis_md: str, meta: CaseMeta) -> bytes:
     style.font.name = "Sarabun"
     style.font.size = Pt(11)
 
-    # Cover heading
-    title_p = doc.add_paragraph()
-    title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    brand_run = title_p.add_run("⚖ SMART LAW · LEGAL MEMO")
-    brand_run.bold = True
-    brand_run.font.size = Pt(10)
-    brand_run.font.color.rgb = RGBColor(0x0F, 0x76, 0x6E)
+    # ── COVER PAGE (formal Thai legal style) ──────────────────────────────
+    running = " — ".join(filter(None, [
+        f"คดีหมายเลข {meta.case_number}" if meta.case_number else None,
+        meta.court or None,
+    ]))
+    if running:
+        _cover_para(doc, running, size=10, space_after=24)
+    else:
+        _cover_para(doc, "", size=10, space_after=24)
 
-    h = doc.add_paragraph()
-    h.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_run = h.add_run(meta.title or "บทสรุปคดี")
-    title_run.bold = True
-    title_run.font.size = Pt(22)
-    title_run.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
+    # Main title
+    _cover_para(doc, meta.title or "บทสรุปคดี",
+                size=28, bold=True, space_before=24, space_after=12)
+    _cover_para(doc, "บทสรุปคดีและแนวทางต่อสู้ขั้นสุด",
+                size=15, bold=True, space_after=36)
 
-    sub = doc.add_paragraph()
-    sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    sub_run = sub.add_run("บทสรุปคดีและแนวทางต่อสู้ขั้นสุด")
-    sub_run.font.size = Pt(12)
-    sub_run.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
+    # Case number + court block
+    if meta.case_number:
+        _cover_para(doc, f"คดีหมายเลข {meta.case_number}",
+                    size=13, bold=True, space_after=2)
+    if meta.court:
+        _cover_para(doc, meta.court, size=13, bold=True, space_after=24)
 
-    # Meta box
-    meta_lines = []
-    if meta.case_number:    meta_lines.append(("เลขที่คดี",    meta.case_number))
-    if meta.case_type:      meta_lines.append(("ประเภทคดี",     meta.case_type))
-    if meta.court:          meta_lines.append(("ศาล",           meta.court))
-    if meta.plaintiff_name: meta_lines.append(("โจทก์",          meta.plaintiff_name))
-    if meta.defendant_name: meta_lines.append(("จำเลย",          meta.defendant_name))
-    if meta.claim_amount:   meta_lines.append(("ทุนทรัพย์",      f"฿{meta.claim_amount:,.0f}"))
-    if meta.perspective:    meta_lines.append(("มุมมอง",         meta.perspective))
+    # Charges / case type
+    if meta.case_type:
+        charges = f"ประเภทคดี: {meta.case_type}"
+        if meta.claim_amount:
+            charges += f"  ·  ทุนทรัพย์ ฿{meta.claim_amount:,.0f}"
+        _cover_para(doc, charges, size=12, bold=True, space_after=20)
 
-    if meta_lines:
-        doc.add_paragraph()  # spacer
-        for label, val in meta_lines:
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            r1 = p.add_run(f"{label}: ")
-            r1.bold = True
-            r1.font.color.rgb = RGBColor(0x0F, 0x17, 0x2A)
-            r2 = p.add_run(str(val))
-            r2.font.color.rgb = RGBColor(0x33, 0x41, 0x55)
+    # Parties block — "ระหว่าง" with role labels
+    if meta.plaintiff_name or meta.defendant_name:
+        rows = []
+        if meta.plaintiff_name:
+            rows.append(("ระหว่าง", meta.plaintiff_name, "โจทก์"))
+        if meta.defendant_name:
+            rows.append(("",        meta.defendant_name, "จำเลย"))
+
+        table = doc.add_table(rows=len(rows), cols=3)
+        table.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        table.autofit = True
+        for r_idx, (label, name, role) in enumerate(rows):
+            row = table.rows[r_idx]
+            for cell, txt, bold in (
+                (row.cells[0], label, True),
+                (row.cells[1], name,  False),
+                (row.cells[2], role,  True),
+            ):
+                cell_p = cell.paragraphs[0]
+                cell_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                run = cell_p.add_run(txt)
+                run.font.name = "Sarabun"
+                run.font.size = Pt(12)
+                run.bold = bold
+                run.font.color.rgb = _NAVY
+
+        _cover_para(doc, "", size=10, space_after=8)
+
+    # Disclaimer at bottom
+    _cover_para(doc, "เอกสารนี้เป็นแนวทางวิชาการประกอบการปรึกษาทนายความ",
+                size=10, space_before=72)
+    _cover_para(doc, "มิใช่คำปรึกษาทางกฎหมายอย่างเป็นทางการ", size=10)
+    persp = meta.perspective or "ทั้งสองฝ่าย"
+    from datetime import datetime
+    today_th = datetime.now().strftime("%d/%m/%Y")
+    _cover_para(doc, f"มุมมอง: {persp}  ·  จัดทำวันที่ {today_th}",
+                size=10, space_after=24)
+    _cover_para(doc, "— Smart Law · Legal Memo —",
+                size=9, bold=True, space_after=0)
 
     doc.add_page_break()
 

@@ -9,3 +9,7 @@ alter table public.documents
 
 create index if not exists documents_folder_idx
   on public.documents(case_id, folder);
+
+-- Tell PostgREST to reload its schema cache so the new column
+-- is visible to the API immediately (prevents PGRST204 errors).
+notify pgrst, 'reload schema';

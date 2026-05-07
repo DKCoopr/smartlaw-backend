@@ -231,7 +231,7 @@ def _build_content_blocks(prompt: str, attachments: list[dict]) -> list:
         elif att["mime"] == "text/plain":
             try:
                 text_content = att["bytes"].decode("utf-8", errors="replace")[:50_000]
-                blocks.append({"type": "text", "text": f"=== ไฟล์: {att['name']} ===\n{text_content}\n=== จบไฟล์ ==="})
+                blocks.append({"type": "text", "text": f"=== เอกสาร: {att['name']} ===\n{text_content}\n=== จบเอกสาร ==="})
             except Exception:
                 pass
     blocks.append({"type": "text", "text": prompt})
