@@ -1,4 +1,5 @@
 """Document AI: extract summary from PDF/image/DOCX using Gemini."""
+import io
 import google.generativeai as genai
 from app.config import get_settings
 
@@ -7,6 +8,35 @@ genai.configure(api_key=settings.google_api_key)
 
 # Pro model handles Thai legal documents more accurately than Flash.
 _model = genai.GenerativeModel("gemini-1.5-pro-latest")
+
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def _extract_docx_text(file_bytes: bytes) -> str:
+    """Pull plain text out of a .docx so Gemini (which can't ingest DOCX
+    inline) can summarize it as text/plain. Best-effort: returns "" on any
+    parse failure."""
+    try:
+        from docx import Document   # python-docx — already in requirements.txt
+    except Exception:
+        return ""
+    try:
+        doc = Document(io.BytesIO(file_bytes))
+        parts: list[str] = []
+        for p in doc.paragraphs:
+            t = (p.text or "").strip()
+            if t:
+                parts.append(t)
+        # Tables — flatten cell-by-cell so structured docs (contracts/letters)
+        # don't lose all numeric/tabular content
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join((c.text or "").strip() for c in row.cells if (c.text or "").strip())
+                if row_text:
+                    parts.append(row_text)
+        return "\n".join(parts).strip()
+    except Exception:
+        return ""
 
 SUMMARY_PROMPT = """คุณเป็นทนายความไทยผู้เชี่ยวชาญ อ่านเอกสารนี้ (เป็นภาษาไทย) แล้วเขียนสรุปเชิงกฎหมายอย่างละเอียดในภาษาไทยทางการ
 
@@ -49,10 +79,28 @@ async def summarize_document(file_bytes: bytes, mime_type: str) -> str:
     """
     Returns a Thai-language summary of the document, or "" if unsupported/too large.
     Errors are swallowed and return "" — summary is best-effort.
+
+    DOCX is handled separately: python-docx extracts the text first, then we
+    feed it to Gemini as text/plain (Gemini cannot ingest DOCX inline).
     """
-    if mime_type not in SUPPORTED_INLINE_MIMES:
-        return ""
     if len(file_bytes) > MAX_INLINE_BYTES:
+        return ""
+
+    # DOCX path: extract text → call Gemini as text/plain
+    if mime_type == DOCX_MIME:
+        text = _extract_docx_text(file_bytes)
+        if not text:
+            return ""
+        try:
+            response = await _model.generate_content_async([
+                {"mime_type": "text/plain", "data": text.encode("utf-8")},
+                SUMMARY_PROMPT,
+            ])
+            return (response.text or "").strip()
+        except Exception:
+            return ""
+
+    if mime_type not in SUPPORTED_INLINE_MIMES:
         return ""
     try:
         response = await _model.generate_content_async([

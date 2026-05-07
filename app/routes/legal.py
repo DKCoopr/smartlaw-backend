@@ -10,7 +10,7 @@ import anthropic
 from app.auth import get_current_user_id
 from app.config import get_settings
 from app.database import get_supabase
-from app.services.documents import ocr_image
+from app.services.documents import ocr_image, _extract_docx_text, DOCX_MIME
 
 router = APIRouter(prefix="/api/legal", tags=["legal"])
 
@@ -204,6 +204,8 @@ def _content_type(file_type: str) -> str:
         "jpeg": "image/jpeg",
         "webp": "image/webp",
         "txt":  "text/plain",
+        "docx": DOCX_MIME,
+        "doc":  "application/msword",   # legacy .doc — _extract_docx_text won't parse it; will skip
     }.get((file_type or "").lower(), "application/pdf")
 
 
@@ -273,6 +275,22 @@ async def _load_case_attachments(case_id: str, user_id: str, doc_ids: Optional[L
             "bytes": file_bytes,
             "ocr_text": None,
         }
+
+        # DOCX → Claude can't ingest .docx; extract text first and feed as
+        # text/plain. Preserves table content too (see _extract_docx_text).
+        if mime == DOCX_MIME:
+            try:
+                text = _extract_docx_text(file_bytes)
+                if text:
+                    attachment["mime"]  = "text/plain"
+                    attachment["bytes"] = text.encode("utf-8")
+                    print(f"[legal/analyze] DOCX→text {name}: {len(text)} chars")
+                else:
+                    debug["errors"].append(f"{name}: DOCX text extract returned empty")
+                    continue   # skip — nothing useful to send
+            except Exception as e:
+                debug["errors"].append(f"{name}: DOCX extract failed — {e}")
+                continue
 
         # Image → run OCR first to capture handwriting/text reliably
         if mime.startswith("image/"):
