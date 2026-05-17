@@ -3,7 +3,6 @@ Admin API — system health, user management, stats, error logs.
 All endpoints require profiles.role = 'admin'.
 """
 import time
-import asyncio
 from typing import Optional, Literal
 from datetime import datetime, timedelta, timezone
 
@@ -377,8 +376,11 @@ async def list_errors(
 async def clear_errors(_: str = Depends(require_admin)):
     db = get_supabase()
     try:
-        # delete all rows (PostgREST requires a filter — use 'created_at' that's always set)
-        db.table("error_logs").delete().gte("id", 0).execute()
+        # PostgREST requires a filter on bulk delete. created_at is a NOT NULL
+        # timestamptz that's always populated, so a far-past lower bound nukes
+        # everything. (Previously used .gte("id", 0) which silently no-op'd on
+        # UUID primary keys.)
+        db.table("error_logs").delete().gte("created_at", "1970-01-01T00:00:00Z").execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"ok": True}
