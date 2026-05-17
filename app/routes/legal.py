@@ -4,13 +4,14 @@ import base64
 import time
 import uuid
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 import anthropic
 from app.auth import get_current_user_id
 from app.config import get_settings
 from app.database import get_supabase
 from app.services.documents import ocr_image, _extract_docx_text, _extract_doc_text, DOCX_MIME, DOC_MIME
+from app.services.brave_search import search_thai_legal, format_for_prompt
 
 router = APIRouter(prefix="/api/legal", tags=["legal"])
 
@@ -679,15 +680,42 @@ async def _do_analyze(payload: "AnalyzeIn", user_id: str) -> dict:
 
     print(f"[legal/analyze] case_id={payload.case_id} attachments={len(attachments)} bytes={sum(len(a['bytes']) for a in attachments)}")
 
-    # 2. Pick model (Sonnet for simple, Opus for complex/heavy attachments)
+    # 2. Thai Legal DB search — run in parallel with nothing yet (fast, ~2-3s)
+    #    Build doc summaries string from attachment names for better queries
+    doc_summary_str = " ".join(a["name"] for a in attachments)
+    legal_search_results = []
+    brave_key = settings.brave_search_api_key
+    if brave_key:
+        try:
+            legal_search_results = await search_thai_legal(
+                api_key=brave_key,
+                case_type=payload.case.case_type or "",
+                plaintiff=payload.case.plaintiff_name or "",
+                defendant=payload.case.defendant_name or "",
+                claim_amount=payload.case.claim_amount or 0,
+                transcript=payload.case.transcript or "",
+                notes=payload.case.notes or "",
+                doc_summaries=doc_summary_str,
+            )
+            print(f"[legal/search] found {len(legal_search_results)} results from Thai legal DB")
+        except Exception as e:
+            print(f"[legal/search] search failed (non-fatal): {e}")
+    else:
+        print("[legal/search] BRAVE_SEARCH_API_KEY not set — skipping legal DB search")
+
+    # 3. Pick model (Sonnet for simple, Opus for complex/heavy attachments)
     chosen_model = _pick_model(payload.case, attachments)
 
-    # 3. Run Claude with PDFs as document blocks + final prompt
-    prompt = _analysis_prompt(payload.case, payload.perspective, has_attachments=bool(attachments))
+    # 4. Build prompt — inject legal DB search results at the top
+    base_prompt = _analysis_prompt(payload.case, payload.perspective, has_attachments=bool(attachments))
+    legal_db_block = format_for_prompt(legal_search_results)
+    # Inject search results BEFORE the main analysis template so Claude sees them first
+    prompt = f"{legal_db_block}\n\n{base_prompt}" if legal_db_block else base_prompt
 
+    # 5. Run Claude with PDFs as document blocks + enriched prompt
     analysis_text = await _claude_call(prompt, chosen_model, attachments, max_tokens=32000)
 
-    # 4. Document drafts (in parallel, also with attachments for context)
+    # 6. Document drafts (in parallel, also with attachments for context)
     documents: dict[str, str] = {}
     if payload.document_types:
         results = await asyncio.gather(
@@ -702,6 +730,7 @@ async def _do_analyze(payload: "AnalyzeIn", user_id: str) -> dict:
         "model_used": chosen_model,
         "complexity_score": _complexity_score(payload.case, attachments),
         "attachments_count": len(attachments),
+        "legal_search_results": legal_search_results,   # ส่งกลับ frontend ด้วย
         "debug": debug,
         "documents": documents,
     }
@@ -971,3 +1000,37 @@ async def _draft_document(doc_type: str, case: CaseInput, model: str, attachment
         return f"ประเภทเอกสารไม่รองรับ: {doc_type}"
 
     return await _claude_call(prompt, model, attachments, max_tokens=16000)
+
+
+# ── Standalone Thai Legal Search endpoint ────────────────────────────────────
+
+@router.get("/search")
+async def thai_legal_search(
+    q: str = Query(..., description="คำค้นหา เช่น 'ฉ้อโกง มาตรา 341' หรือ 'ผิดสัญญาเช่า'"),
+    case_type: str = Query("", description="ประเภทคดี เช่น แพ่ง อาญา แรงงาน"),
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    ค้นหาฎีกา / กฎหมายไทยจากฐานข้อมูลภายนอก
+    ใช้ Brave Search กรองเฉพาะแหล่งกฎหมายไทยที่น่าเชื่อถือ
+    """
+    brave_key = settings.brave_search_api_key
+    if not brave_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Thai legal search ยังไม่พร้อมใช้งาน — กรุณาตั้งค่า BRAVE_SEARCH_API_KEY",
+        )
+    try:
+        results = await search_thai_legal(
+            api_key=brave_key,
+            case_type=case_type,
+            transcript=q,
+        )
+        return {
+            "query": q,
+            "results": results,
+            "total": len(results),
+            "sources": list({r["source_label"] for r in results}),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ค้นหาไม่สำเร็จ: {str(e)}")

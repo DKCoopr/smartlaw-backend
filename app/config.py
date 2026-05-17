@@ -19,6 +19,9 @@ class Settings:
         self.redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
         self.max_audio_mb = int(os.environ.get("MAX_AUDIO_MB", "25"))
 
+        # Thai Legal Search (Brave Search API)
+        self.brave_search_api_key = os.environ.get("BRAVE_SEARCH_API_KEY", "")
+
 
 @lru_cache()
 def get_settings() -> Settings:
