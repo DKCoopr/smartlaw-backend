@@ -1,6 +1,7 @@
 """Legal analysis — Claude reads PDFs natively (no Gemini middleman)."""
 import asyncio
 import base64
+import re
 import time
 import uuid
 from typing import List, Optional, Dict, Any
@@ -321,19 +322,65 @@ async def _load_case_attachments(case_id: str, user_id: str, doc_ids: Optional[L
 
 
 def _complexity_score(case: CaseInput, attachments: list[dict]) -> int:
+    """
+    คะแนนความซับซ้อน 0-17+
+    ─────────────────────────────────────────────────────────
+    0-5   → Sonnet (คดีง่าย / เตรียมข้อมูล)
+    6-10  → Opus   (คดีซับซ้อน / มีเอกสารมาก)
+    11+   → Opus + Extended Thinking (คดียาก / ทุนทรัพย์สูงมาก)
+    ─────────────────────────────────────────────────────────
+    """
     s = 0
     total_text = (case.transcript or "") + (case.notes or "")
-    s += min(3, len(total_text) // 1500)
-    s += min(3, len(attachments))
-    if (case.claim_amount or 0) >= 5_000_000: s += 1
-    if (case.claim_amount or 0) >= 50_000_000: s += 1
-    if case.case_type in ("ปกครอง", "อาญา", "ภาษี"): s += 1
+    total_bytes = sum(len(a.get("bytes", b"")) for a in attachments)
+
+    # ── เนื้อหา / บันทึก ──────────────────────────────────────────────────────
+    s += min(2, len(total_text) // 2000)            # บันทึกยาว > 2000 ตัวอักษร
+
+    # ── เอกสารแนบ ─────────────────────────────────────────────────────────────
+    s += min(3, len(attachments))                   # จำนวนเอกสาร (max +3)
+    if total_bytes >= 10 * 1024 * 1024: s += 2      # ไฟล์รวม > 10 MB
+    elif total_bytes >= 5 * 1024 * 1024:  s += 1    # ไฟล์รวม > 5 MB
+
+    # ── ทุนทรัพย์ ─────────────────────────────────────────────────────────────
+    amt = case.claim_amount or 0
+    if   amt >= 100_000_000: s += 5   # > 100 ล้าน → สูงมาก
+    elif amt >=  10_000_000: s += 3   # > 10 ล้าน
+    elif amt >=   1_000_000: s += 2   # > 1 ล้าน
+    elif amt >=     500_000: s += 1   # > 500,000
+
+    # ── ประเภทคดี ─────────────────────────────────────────────────────────────
+    HIGH_COMPLEX = {"ปกครอง", "ภาษี", "ล้มละลาย", "ฟื้นฟูกิจการ",
+                    "ทรัพย์สินทางปัญญา", "อนุญาโตตุลาการ"}
+    MED_COMPLEX  = {"อาญา", "ที่ดิน", "มรดก", "หุ้นส่วน", "บริษัท",
+                    "แรงงาน", "ครอบครัว"}
+    ct = case.case_type or ""
+    if ct in HIGH_COMPLEX:  s += 3
+    elif ct in MED_COMPLEX: s += 2
+
+    # ── สัญญาณอื่น ────────────────────────────────────────────────────────────
+    if case.plaintiff_name and case.defendant_name: s += 1  # ระบุคู่ความครบ
     if "ฎีกา" in total_text or "อุทธรณ์" in total_text: s += 1
+    if re.search(r"มาตรา\s*\d", total_text): s += 1         # อ้างมาตรากฎหมายแล้ว
+
     return s
 
 
-def _pick_model(case: CaseInput, attachments: list[dict]) -> str:
-    return OPUS if _complexity_score(case, attachments) >= 4 else SONNET
+def _pick_model(case: CaseInput, attachments: list[dict]) -> tuple[str, bool]:
+    """
+    คืนค่า (model_name, use_extended_thinking)
+    ────────────────────────────────────────────
+    score  0-5  → Sonnet,     no thinking
+    score  6-10 → Opus,       no thinking
+    score 11+   → Opus,       extended thinking ON
+    """
+    score = _complexity_score(case, attachments)
+    if score >= 11:
+        return OPUS, True     # คดียาก — คิดลึกก่อนตอบ
+    elif score >= 6:
+        return OPUS, False    # คดีซับซ้อน — Opus ปกติ
+    else:
+        return SONNET, False  # คดีง่าย — Sonnet เร็วกว่า ถูกกว่า
 
 
 def _build_content_blocks(prompt: str, attachments: list[dict]) -> list:
@@ -374,10 +421,48 @@ def _build_content_blocks(prompt: str, attachments: list[dict]) -> list:
     return blocks
 
 
-async def _claude_call(prompt: str, model: str, attachments: list[dict], max_tokens: int = 32000) -> str:
-    """Stream Claude response so we can use very high max_tokens without timeouts."""
+async def _claude_call(
+    prompt: str,
+    model: str,
+    attachments: list[dict],
+    max_tokens: int = 32000,
+    extended_thinking: bool = False,
+) -> str:
+    """
+    เรียก Claude วิเคราะห์คดี
+    ─────────────────────────────────────────────────────────
+    extended_thinking=True → เปิด Extended Thinking (Opus only)
+      - Claude คิดลึก ~8,000 tokens ก่อนตอบ (ไม่นับใน max_tokens)
+      - เหมาะกับคดียาก ทุนทรัพย์สูง หรืออ้างมาตรากฎหมายซับซ้อน
+      - ช้าขึ้น ~2-4 นาที แต่ความแม่นยำสูงขึ้นมาก
+    ─────────────────────────────────────────────────────────
+    """
     content = _build_content_blocks(prompt, attachments)
 
+    # Extended Thinking ไม่รองรับ streaming + temperature ต้องเป็น 1
+    if extended_thinking and model == OPUS:
+        print(f"[legal/analyze] 🧠 Extended Thinking ON — model={model} budget=8000 tokens")
+        try:
+            resp = await _claude.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=1,          # required for extended thinking
+                thinking={
+                    "type":         "enabled",
+                    "budget_tokens": 8000,  # Claude คิดก่อนตอบ 8K tokens
+                },
+                messages=[{"role": "user", "content": content}],
+            )
+            # content อาจมี thinking blocks — เอาเฉพาะ text blocks
+            return "".join(
+                block.text for block in resp.content
+                if hasattr(block, "text") and block.type == "text"
+            ).strip()
+        except Exception as e:
+            print(f"[legal/analyze] Extended Thinking failed ({e}), falling back to normal Opus")
+            # fallthrough to streaming below
+
+    # Normal streaming call (Sonnet หรือ Opus ปกติ)
     async def _stream(mt: int) -> str:
         chunks: list[str] = []
         async with _claude.messages.stream(
@@ -393,7 +478,6 @@ async def _claude_call(prompt: str, model: str, attachments: list[dict], max_tok
     try:
         return await _stream(max_tokens)
     except Exception:
-        # Retry with smaller token budget
         return await _stream(min(max_tokens, 24000))
 
 
@@ -703,8 +787,10 @@ async def _do_analyze(payload: "AnalyzeIn", user_id: str) -> dict:
     else:
         print("[legal/search] BRAVE_SEARCH_API_KEY not set — skipping legal DB search")
 
-    # 3. Pick model (Sonnet for simple, Opus for complex/heavy attachments)
-    chosen_model = _pick_model(payload.case, attachments)
+    # 3. Pick model (Sonnet / Opus / Opus+ExtendedThinking ตามความซับซ้อน)
+    chosen_model, use_thinking = _pick_model(payload.case, attachments)
+    complexity = _complexity_score(payload.case, attachments)
+    print(f"[legal/analyze] complexity={complexity} model={chosen_model} thinking={use_thinking}")
 
     # 4. Build prompt — inject legal DB search results at the top
     base_prompt = _analysis_prompt(payload.case, payload.perspective, has_attachments=bool(attachments))
@@ -713,7 +799,11 @@ async def _do_analyze(payload: "AnalyzeIn", user_id: str) -> dict:
     prompt = f"{legal_db_block}\n\n{base_prompt}" if legal_db_block else base_prompt
 
     # 5. Run Claude with PDFs as document blocks + enriched prompt
-    analysis_text = await _claude_call(prompt, chosen_model, attachments, max_tokens=32000)
+    analysis_text = await _claude_call(
+        prompt, chosen_model, attachments,
+        max_tokens=32000,
+        extended_thinking=use_thinking,
+    )
 
     # 6. Document drafts (in parallel, also with attachments for context)
     documents: dict[str, str] = {}
@@ -728,7 +818,8 @@ async def _do_analyze(payload: "AnalyzeIn", user_id: str) -> dict:
     return {
         "analysis": analysis_text,
         "model_used": chosen_model,
-        "complexity_score": _complexity_score(payload.case, attachments),
+        "complexity_score": complexity,
+        "extended_thinking_used": use_thinking,
         "attachments_count": len(attachments),
         "legal_search_results": legal_search_results,   # ส่งกลับ frontend ด้วย
         "debug": debug,

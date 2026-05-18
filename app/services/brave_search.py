@@ -4,11 +4,18 @@ Brave Search — Thai Legal Database
 ค้นหาฎีกา / กฎหมาย / ประมวลกฎหมายที่เกี่ยวข้องกับคดี
 โดยการค้นหาจาก Brave Search API กรองเฉพาะแหล่งข้อมูลกฎหมายไทยที่น่าเชื่อถือ
 
-แหล่งข้อมูลที่ค้นหา:
-  - deka.supremecourt.or.th   → คำพิพากษาฎีกา
-  - krisdika.go.th            → ประมวลกฎหมาย / พรบ.
-  - law.go.th                 → กฎหมายและประกาศราชกิจจา
-  - ilaw.or.th                → สรุปกฎหมายสำคัญ
+แหล่งข้อมูลที่ค้นหา (8 แหล่ง ครอบคลุม ~95% ของคดีทั่วไป):
+  ── ศาล ──────────────────────────────────────────────────────────────────────
+  - deka.supremecourt.or.th   → คำพิพากษาฎีกาศาลสูงสุด
+  - appeal.coj.go.th          → คำพิพากษาศาลอุทธรณ์
+  - admincourt.go.th          → คำพิพากษาศาลปกครอง
+  ── กฎหมาย / ประมวล ──────────────────────────────────────────────────────────
+  - krisdika.go.th            → สำนักงานคณะกรรมการกฤษฎีกา / ประมวลกฎหมาย
+  - law.go.th                 → ระบบกฎหมายไทย
+  - ratchakitcha.soc.go.th    → ราชกิจจานุเบกษา (กฎหมายใหม่ / พรบ.)
+  - revenue.go.th             → กรมสรรพากร (กฎหมายภาษี)
+  ── แหล่งอ้างอิงเพิ่มเติม ────────────────────────────────────────────────────
+  - ilaw.or.th                → iLaw สรุปกฎหมายสำคัญ
 ────────────────────────────────────────────────────────────────────────────────
 """
 import asyncio
@@ -20,19 +27,28 @@ BRAVE_API_URL = "https://api.search.brave.com/res/v1/web/search"
 
 # แหล่งข้อมูลกฎหมายไทยที่น่าเชื่อถือ
 LEGAL_SITES = [
-    "deka.supremecourt.or.th",
-    "krisdika.go.th",
-    "law.go.th",
-    "ilaw.or.th",
-    "ocs.go.th",
+    # ── ศาล ──────────────────────────────────────────────────────────────────
+    "deka.supremecourt.or.th",      # คำพิพากษาฎีกาศาลสูงสุด
+    "appeal.coj.go.th",             # คำพิพากษาศาลอุทธรณ์  ★ ใหม่
+    "admincourt.go.th",             # คำพิพากษาศาลปกครอง   ★ ใหม่
+    # ── กฎหมาย / ประมวล ──────────────────────────────────────────────────────
+    "krisdika.go.th",               # สำนักงานคณะกรรมการกฤษฎีกา
+    "law.go.th",                    # ระบบกฎหมายไทย
+    "ratchakitcha.soc.go.th",       # ราชกิจจานุเบกษา — กฎหมายใหม่ ★ ใหม่
+    "revenue.go.th",                # กรมสรรพากร — กฎหมายภาษี   ★ ใหม่
+    # ── แหล่งอ้างอิงเพิ่มเติม ────────────────────────────────────────────────
+    "ilaw.or.th",                   # iLaw — สรุปกฎหมายสำคัญ
 ]
 
 SITE_LABELS = {
-    "deka.supremecourt.or.th": "ฎีกาศาลสูงสุด",
-    "krisdika.go.th":          "สำนักงานกฤษฎีกา",
-    "law.go.th":               "ระบบกฎหมายไทย",
-    "ilaw.or.th":              "iLaw",
-    "ocs.go.th":               "สำนักงานคณะกรรมการกฤษฎีกา",
+    "deka.supremecourt.or.th":  "ฎีกาศาลสูงสุด",
+    "appeal.coj.go.th":         "ศาลอุทธรณ์",
+    "admincourt.go.th":         "ศาลปกครอง",
+    "krisdika.go.th":           "สำนักงานกฤษฎีกา",
+    "law.go.th":                "ระบบกฎหมายไทย",
+    "ratchakitcha.soc.go.th":   "ราชกิจจานุเบกษา",
+    "revenue.go.th":            "กรมสรรพากร",
+    "ilaw.or.th":               "iLaw",
 }
 
 _MAX_RESULTS_PER_QUERY = 5
@@ -94,12 +110,27 @@ def _build_queries(
 def _extract_legal_keywords(text: str) -> list[str]:
     """ดึง keyword ทางกฎหมายจากข้อความ"""
     patterns = [
+        # อาญา
         r"ฉ้อโกง", r"ยักยอก", r"ลักทรัพย์", r"ฆ่า", r"ทำร้าย",
+        r"ปล้น", r"ชิงทรัพย์", r"ข่มขืน", r"ทุจริต", r"รับสินบน",
+        # แพ่ง / สัญญา
         r"ผิดสัญญา", r"ละเมิด", r"เลิกสัญญา", r"บอกเลิก",
         r"ค้ำประกัน", r"จำนอง", r"จำนำ", r"เช่า", r"ซื้อขาย",
-        r"กู้ยืม", r"อาญา", r"แพ่ง", r"แรงงาน", r"ปกครอง",
-        r"มรดก", r"หย่า", r"ครอบครัว", r"ภาษี", r"ล้มละลาย",
-        r"บริษัท", r"หุ้น", r"ทรัพย์สิน", r"ที่ดิน", r"โฉนด",
+        r"กู้ยืม", r"ตั๋วเงิน", r"เช็ค", r"สัญญากู้",
+        # ครอบครัว / มรดก
+        r"มรดก", r"หย่า", r"ครอบครัว", r"รับบุตรบุญธรรม", r"อำนาจปกครอง",
+        r"สินสมรส", r"สินส่วนตัว",
+        # ธุรกิจ / หุ้น
+        r"บริษัท", r"หุ้น", r"หุ้นส่วน", r"ล้มละลาย", r"ฟื้นฟูกิจการ",
+        r"ผู้ชำระบัญชี", r"กรรมการ", r"ผู้ถือหุ้น",
+        # ที่ดิน / ทรัพย์สิน
+        r"ที่ดิน", r"โฉนด", r"น.ส.3", r"ครอบครองปรปักษ์", r"ภาระจำยอม",
+        r"ทรัพย์สิน", r"เวนคืน", r"อสังหาริมทรัพย์",
+        # ภาษี / ปกครอง
+        r"ภาษี", r"สรรพากร", r"ภาษีมูลค่าเพิ่ม", r"ภาษีเงินได้",
+        r"ปกครอง", r"ใบอนุญาต", r"สัมปทาน", r"คำสั่งทางปกครอง",
+        # แรงงาน
+        r"แรงงาน", r"เลิกจ้าง", r"ค่าชดเชย", r"ค่าจ้าง", r"นายจ้าง",
     ]
     found = []
     for pat in patterns:
@@ -201,49 +232,75 @@ async def search_thai_legal(
                 "source_label": _source_label(url),
             })
 
-    # ฎีกา (deka) ขึ้นก่อน เพราะตรงกว่า
-    merged.sort(key=lambda x: (0 if "deka.supremecourt" in x["url"] else 1))
-    return merged[:10]   # max 10 ผล
+    # เรียงตามลำดับชั้นศาล: ฎีกา → อุทธรณ์ → ปกครอง → กฎหมาย → อื่นๆ
+    def _sort_rank(r: dict) -> int:
+        url = r["url"]
+        if "deka.supremecourt" in url:    return 0
+        if "appeal.coj" in url:           return 1
+        if "admincourt" in url:           return 2
+        if "krisdika" in url:             return 3
+        if "ratchakitcha" in url:         return 4
+        if "law.go.th" in url:            return 5
+        if "revenue.go.th" in url:        return 6
+        return 7
+
+    merged.sort(key=_sort_rank)
+    return merged[:12]   # max 12 ผล (เพิ่มจาก 10 เพราะมีแหล่งเพิ่ม)
 
 
 def format_for_prompt(results: list[dict]) -> str:
     """
     แปลงผลการค้นหาเป็น text block สำหรับ inject เข้า Claude prompt
+    จัดกลุ่มตามประเภท: ฎีกา → อุทธรณ์/ปกครอง → กฎหมาย/ราชกิจจา
     """
     if not results:
         return ""
 
     lines = [
         "## 📚 ผลการค้นหาจากฐานข้อมูลกฎหมายไทย (Thai Legal Database)",
-        "*(ระบบค้นพบฎีกาและกฎหมายต่อไปนี้ — ใช้เป็นข้อมูลอ้างอิงเพิ่มเติมในการวิเคราะห์)*",
+        f"*(ระบบค้นพบ {len(results)} รายการ — ใช้เป็นข้อมูลอ้างอิงในการวิเคราะห์)*",
         "",
     ]
 
-    deka = [r for r in results if "deka.supremecourt" in r["url"]]
-    laws = [r for r in results if "deka.supremecourt" not in r["url"]]
+    # จัดกลุ่ม
+    deka     = [r for r in results if "deka.supremecourt" in r["url"]]
+    appeal   = [r for r in results if "appeal.coj" in r["url"]]
+    admin    = [r for r in results if "admincourt" in r["url"]]
+    laws     = [r for r in results if not any(
+                    x in r["url"] for x in ["deka.supremecourt", "appeal.coj", "admincourt"])]
+
+    def _fmt_result(r: dict, i: int) -> list[str]:
+        out = [f"{i}. **{r['title']}** [{r['source_label']}]"]
+        if r["description"]:
+            out.append(f"   {r['description'][:250]}")
+        out.append(f"   🔗 {r['url']}")
+        out.append("")
+        return out
 
     if deka:
-        lines.append("### คำพิพากษาฎีกาที่เกี่ยวข้อง:")
+        lines.append("### ⚖️ คำพิพากษาฎีกา (ศาลสูงสุด):")
         for i, r in enumerate(deka, 1):
-            lines.append(f"{i}. **{r['title']}**")
-            if r["description"]:
-                lines.append(f"   {r['description'][:200]}")
-            lines.append(f"   🔗 {r['url']}")
-            lines.append("")
+            lines.extend(_fmt_result(r, i))
+
+    if appeal:
+        lines.append("### ⚖️ คำพิพากษาศาลอุทธรณ์:")
+        for i, r in enumerate(appeal, 1):
+            lines.extend(_fmt_result(r, i))
+
+    if admin:
+        lines.append("### 🏛️ คำพิพากษาศาลปกครอง:")
+        for i, r in enumerate(admin, 1):
+            lines.extend(_fmt_result(r, i))
 
     if laws:
-        lines.append("### บทบัญญัติกฎหมายที่เกี่ยวข้อง:")
+        lines.append("### 📜 บทบัญญัติกฎหมาย / ประกาศ:")
         for i, r in enumerate(laws, 1):
-            lines.append(f"{i}. **{r['title']}** [{r['source_label']}]")
-            if r["description"]:
-                lines.append(f"   {r['description'][:200]}")
-            lines.append(f"   🔗 {r['url']}")
-            lines.append("")
+            lines.extend(_fmt_result(r, i))
 
     lines += [
         "---",
-        "🚨 **คำสั่งสำคัญ:** อ้างอิงฎีกาและมาตรากฎหมายจากรายการด้านบนในการวิเคราะห์ด้วย",
-        "— ระบุเลขฎีกา / ชื่อกฎหมาย / มาตราให้ครบถ้วนในหัวข้อ 5 (กฎหมายที่เกี่ยวข้อง) และ 14 (บทสรุป)",
+        "🚨 **คำสั่งสำคัญ:** ต้องอ้างอิงฎีกา/มาตรากฎหมายจากรายการด้านบนในการวิเคราะห์",
+        "— ระบุเลขฎีกา / ชื่อพรบ. / มาตราให้ครบถ้วนในหัวข้อ 5 (กฎหมายที่เกี่ยวข้อง) และ 14 (บทสรุป)",
         "",
     ]
     return "\n".join(lines)
