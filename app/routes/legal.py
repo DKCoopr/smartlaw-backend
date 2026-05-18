@@ -36,8 +36,8 @@ _claude = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 SONNET = "claude-sonnet-4-6"
 OPUS   = "claude-opus-4-7"
 
-MAX_DOC_FILES   = 8
-MAX_DOC_BYTES   = 18 * 1024 * 1024
+MAX_DOC_FILES   = 100
+MAX_DOC_BYTES   = 32 * 1024 * 1024
 
 
 class CaseInput(BaseModel):
