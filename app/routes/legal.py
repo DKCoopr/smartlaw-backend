@@ -1,11 +1,13 @@
 """Legal analysis — Claude reads PDFs natively (no Gemini middleman)."""
 import asyncio
 import base64
+import json
 import re
 import time
 import uuid
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, AsyncIterator
 from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import anthropic
 from app.auth import get_current_user_id
@@ -36,8 +38,47 @@ _claude = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 SONNET = "claude-sonnet-4-6"
 OPUS   = "claude-opus-4-7"
 
-MAX_DOC_FILES   = 100
-MAX_DOC_BYTES   = 32 * 1024 * 1024
+MAX_PAGES       = 150            # หน้ารวมสูงสุด: PDF นับหน้าจริง, รูป/ไฟล์อื่น = 1 หน้า
+MAX_DOC_FILES   = 100            # safety cap กัน loop ยาวเกิน
+MAX_DOC_BYTES   = 32 * 1024 * 1024   # 32 MB รวมทุกไฟล์
+
+
+# ── Page counting helpers ─────────────────────────────────────────────────────
+
+def _count_pdf_pages(file_bytes: bytes) -> int:
+    """นับหน้า PDF จริงด้วย pypdf — fallback 1 หน้าถ้าอ่านไม่ได้"""
+    try:
+        import io
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+        return max(1, len(reader.pages))
+    except Exception:
+        return 1
+
+
+def _count_docx_pages(file_bytes: bytes) -> int:
+    """
+    ประมาณหน้า DOCX จาก word count
+    ~250 คำต่อหน้า (เอกสารกฎหมายไทยมีความหนาแน่นปานกลาง)
+    """
+    try:
+        import io
+        from docx import Document
+        doc = Document(io.BytesIO(file_bytes))
+        words = sum(len(p.text.split()) for p in doc.paragraphs if p.text.strip())
+        return max(1, round(words / 250))
+    except Exception:
+        return 1
+
+
+def _count_pages(file_bytes: bytes, mime: str) -> int:
+    """คืนจำนวนหน้าของไฟล์ตาม MIME type"""
+    if mime == "application/pdf":
+        return _count_pdf_pages(file_bytes)
+    if mime == DOCX_MIME:
+        return _count_docx_pages(file_bytes)
+    # DOC (legacy), images, text → นับเป็น 1 หน้าเสมอ
+    return 1
 
 
 class CaseInput(BaseModel):
@@ -220,7 +261,7 @@ async def _load_case_attachments(case_id: str, user_id: str, doc_ids: Optional[L
 
     If doc_ids is provided, only load those specific documents (subset selection).
     """
-    debug = {"case_id": case_id, "user_id": user_id, "rows_found": 0, "loaded": [], "errors": [], "subset": bool(doc_ids)}
+    debug = {"case_id": case_id, "user_id": user_id, "rows_found": 0, "loaded": [], "errors": [], "skipped": [], "subset": bool(doc_ids)}
     if not case_id:
         debug["errors"].append("no case_id provided")
         return [], debug
@@ -251,6 +292,7 @@ async def _load_case_attachments(case_id: str, user_id: str, doc_ids: Optional[L
 
     out = []
     total_bytes = 0
+    total_pages = 0
     for d in rows_data[:MAX_DOC_FILES]:
         path = d.get("storage_path")
         name = d.get("original_name") or d.get("doc_label") or "document"
@@ -267,9 +309,29 @@ async def _load_case_attachments(case_id: str, user_id: str, doc_ids: Optional[L
         if not file_bytes:
             debug["errors"].append(f"{name}: empty file")
             continue
+
+        # ── Page-based limit ──────────────────────────────────────────────────
+        file_pages = _count_pages(file_bytes, mime)
+        if total_pages + file_pages > MAX_PAGES:
+            debug["skipped"].append({
+                "name":   name,
+                "reason": "page_limit",
+                "pages":  file_pages,
+                "detail": f"ไฟล์นี้มี {file_pages} หน้า — เกินโควต้า {MAX_PAGES} หน้า (ใช้แล้ว {total_pages} หน้า)",
+            })
+            print(f"[legal/analyze] page limit: skip {name} ({file_pages}p, used={total_pages}/{MAX_PAGES})")
+            continue   # skip ไฟล์นี้ แต่ยังดูไฟล์ถัดไปต่อ (ไม่ break)
+
+        # ── Size limit ────────────────────────────────────────────────────────
         if total_bytes + len(file_bytes) > MAX_DOC_BYTES:
-            debug["errors"].append(f"{name}: skipped — total size limit reached")
-            break
+            debug["skipped"].append({
+                "name":   name,
+                "reason": "size_limit",
+                "pages":  file_pages,
+                "detail": f"ขนาดไฟล์รวมเกิน 32 MB",
+            })
+            print(f"[legal/analyze] size limit: skip {name}")
+            continue
 
         attachment = {
             "name": name,
@@ -311,13 +373,20 @@ async def _load_case_attachments(case_id: str, user_id: str, doc_ids: Optional[L
 
         out.append(attachment)
         total_bytes += len(file_bytes)
+        total_pages += file_pages
         debug["loaded"].append({
-            "name": name, "bytes": len(file_bytes), "mime": mime,
+            "name":      name,
+            "bytes":     len(file_bytes),
+            "mime":      mime,
+            "pages":     file_pages,
             "ocr_chars": len(attachment["ocr_text"]) if attachment["ocr_text"] else 0,
         })
-        print(f"[legal/analyze] attached: {name} ({len(file_bytes)} bytes, {mime})")
+        print(f"[legal/analyze] attached: {name} ({len(file_bytes)} bytes, {file_pages}p, {mime})")
 
     debug["total_bytes"] = total_bytes
+    debug["total_pages"] = total_pages
+    if debug["skipped"]:
+        print(f"[legal/analyze] {len(debug['skipped'])} file(s) skipped: {[s['name'] for s in debug['skipped']]}")
     return out, debug
 
 
@@ -844,6 +913,147 @@ async def _run_job(job_id: str, payload: "AnalyzeIn", user_id: str):
             "finished_at": time.time(),
             "error": str(e),
         }
+
+
+def _sse(event: dict) -> str:
+    """Serialize a dict as a single SSE data line."""
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+async def _stream_analysis(payload: "AnalyzeIn", user_id: str) -> AsyncIterator[str]:
+    """Async generator that yields SSE-formatted strings for the stream endpoint."""
+
+    # ── 1. Load documents ────────────────────────────────────────────────────
+    yield _sse({"type": "status", "message": "กำลังเชื่อมต่อและโหลดเอกสาร..."})
+    attachments, debug = [], {"case_id": None}
+    if payload.case_id:
+        attachments, debug = await _load_case_attachments(payload.case_id, user_id, payload.doc_ids)
+        n = len(attachments)
+        pg = debug.get("total_pages", 0)
+        mb = round(debug.get("total_bytes", 0) / 1024 / 1024, 2)
+        yield _sse({"type": "status", "message": f"โหลดเอกสารแล้ว {n} ฉบับ · {pg} หน้า · {mb} MB"})
+
+    # ── 2. Brave Search (parallel-ish — start before waiting on model pick) ─
+    yield _sse({"type": "status", "message": "กำลังค้นหาฎีกาและกฎหมายที่เกี่ยวข้อง..."})
+    legal_search_results = []
+    doc_summary_str = " ".join(a["name"] for a in attachments)
+    brave_key = settings.brave_search_api_key
+    if brave_key:
+        try:
+            legal_search_results = await search_thai_legal(
+                api_key=brave_key,
+                case_type=payload.case.case_type or "",
+                plaintiff=payload.case.plaintiff_name or "",
+                defendant=payload.case.defendant_name or "",
+                claim_amount=payload.case.claim_amount or 0,
+                transcript=payload.case.transcript or "",
+                notes=payload.case.notes or "",
+                doc_summaries=doc_summary_str,
+            )
+            yield _sse({"type": "legal_search", "results": legal_search_results})
+            print(f"[legal/stream] found {len(legal_search_results)} results from Thai legal DB")
+        except Exception as e:
+            print(f"[legal/stream] search failed (non-fatal): {e}")
+
+    # ── 3. Pick model ────────────────────────────────────────────────────────
+    chosen_model, use_thinking = _pick_model(payload.case, attachments)
+    complexity = _complexity_score(payload.case, attachments)
+    if use_thinking:
+        model_label = "Claude Opus + Extended Thinking (คิดวิเคราะห์เชิงลึก)"
+    elif chosen_model == OPUS:
+        model_label = "Claude Opus"
+    else:
+        model_label = "Claude Sonnet"
+    yield _sse({"type": "status", "message": f"กำลังวิเคราะห์ด้วย {model_label}..."})
+    print(f"[legal/stream] complexity={complexity} model={chosen_model} thinking={use_thinking}")
+
+    # ── 4. Build prompt ──────────────────────────────────────────────────────
+    base_prompt = _analysis_prompt(payload.case, payload.perspective, has_attachments=bool(attachments))
+    legal_db_block = format_for_prompt(legal_search_results)
+    prompt = f"{legal_db_block}\n\n{base_prompt}" if legal_db_block else base_prompt
+    content = _build_content_blocks(prompt, attachments)
+
+    # ── 5. Stream Claude ──────────────────────────────────────────────────────
+    analysis_text = ""
+
+    if use_thinking and chosen_model == OPUS:
+        # Extended Thinking doesn't support streaming — wait, then chunk-send
+        yield _sse({"type": "status", "message": "Claude กำลังคิดวิเคราะห์เชิงลึก (Extended Thinking) ..."})
+        try:
+            resp = await _claude.messages.create(
+                model=chosen_model,
+                max_tokens=32000,
+                temperature=1,
+                thinking={"type": "enabled", "budget_tokens": 8000},
+                messages=[{"role": "user", "content": content}],
+            )
+            analysis_text = "".join(
+                block.text for block in resp.content
+                if hasattr(block, "text") and block.type == "text"
+            ).strip()
+            # Fake-stream in 150-char chunks so the UI updates progressively
+            chunk_size = 150
+            for i in range(0, len(analysis_text), chunk_size):
+                chunk = analysis_text[i:i + chunk_size]
+                yield _sse({"type": "token", "text": chunk})
+                await asyncio.sleep(0)   # yield event loop
+        except Exception as e:
+            print(f"[legal/stream] Extended Thinking failed ({e}), falling back to Opus streaming")
+            use_thinking = False   # fall through to streaming below
+
+    if not (use_thinking and chosen_model == OPUS):
+        # True streaming — Sonnet or Opus (no thinking)
+        try:
+            async with _claude.messages.stream(
+                model=chosen_model,
+                max_tokens=32000,
+                temperature=0.3,
+                messages=[{"role": "user", "content": content}],
+            ) as stream:
+                async for text in stream.text_stream:
+                    analysis_text += text
+                    yield _sse({"type": "token", "text": text})
+        except Exception as e:
+            # Surface the error as a token so the user sees something
+            err_msg = f"\n\n❌ เกิดข้อผิดพลาด: {e}"
+            analysis_text += err_msg
+            yield _sse({"type": "token", "text": err_msg})
+
+    # ── 6. Done ───────────────────────────────────────────────────────────────
+    yield _sse({
+        "type":                  "done",
+        "model_used":            chosen_model,
+        "complexity_score":      complexity,
+        "extended_thinking_used": use_thinking,
+        "attachments_count":     len(attachments),
+        "legal_search_results":  legal_search_results,
+        "debug":                 debug,
+    })
+    yield "data: [DONE]\n\n"
+
+
+@router.post("/analyze/stream")
+async def legal_analyze_stream(
+    payload: AnalyzeIn,
+    user_id: str = Depends(get_current_user_id),
+):
+    """SSE streaming endpoint — tokens arrive in real-time instead of polling.
+
+    Event types emitted:
+      status  — progress message (UI status bar)
+      token   — Claude text chunk (append to result)
+      legal_search — Brave search results (sent early, before Claude finishes)
+      done    — final metadata (model, debug, legal_search_results)
+    """
+    return StreamingResponse(
+        _stream_analysis(payload, user_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":    "no-cache",
+            "X-Accel-Buffering": "no",   # tells nginx/Cloudflare not to buffer
+            "Connection":       "keep-alive",
+        },
+    )
 
 
 @router.post("/analyze")

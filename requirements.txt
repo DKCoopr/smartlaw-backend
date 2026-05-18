@@ -33,3 +33,6 @@ orjson==3.10.3
 
 # Document export (DOCX)
 python-docx==1.1.2
+
+# PDF page counting (for page-based document limit)
+pypdf==4.2.0
