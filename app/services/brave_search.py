@@ -29,13 +29,15 @@ BRAVE_API_URL = "https://api.search.brave.com/res/v1/web/search"
 LEGAL_SITES = [
     # ── ศาล ──────────────────────────────────────────────────────────────────
     "deka.supremecourt.or.th",      # คำพิพากษาฎีกาศาลสูงสุด
-    "appeal.coj.go.th",             # คำพิพากษาศาลอุทธรณ์  ★ ใหม่
-    "admincourt.go.th",             # คำพิพากษาศาลปกครอง   ★ ใหม่
+    "appeal.coj.go.th",             # คำพิพากษาศาลอุทธรณ์
+    "admincourt.go.th",             # คำพิพากษาศาลปกครอง
+    "iptc.go.th",                   # ศาลทรัพย์สินทางปัญญาและการค้าระหว่างประเทศ ★ ใหม่
+    "labourtribunal.go.th",         # ศาลแรงงาน ★ ใหม่
     # ── กฎหมาย / ประมวล ──────────────────────────────────────────────────────
     "krisdika.go.th",               # สำนักงานคณะกรรมการกฤษฎีกา
     "law.go.th",                    # ระบบกฎหมายไทย
-    "ratchakitcha.soc.go.th",       # ราชกิจจานุเบกษา — กฎหมายใหม่ ★ ใหม่
-    "revenue.go.th",                # กรมสรรพากร — กฎหมายภาษี   ★ ใหม่
+    "ratchakitcha.soc.go.th",       # ราชกิจจานุเบกษา — กฎหมายใหม่
+    "revenue.go.th",                # กรมสรรพากร — กฎหมายภาษี
     # ── แหล่งอ้างอิงเพิ่มเติม ────────────────────────────────────────────────
     "ilaw.or.th",                   # iLaw — สรุปกฎหมายสำคัญ
 ]
@@ -44,6 +46,8 @@ SITE_LABELS = {
     "deka.supremecourt.or.th":  "ฎีกาศาลสูงสุด",
     "appeal.coj.go.th":         "ศาลอุทธรณ์",
     "admincourt.go.th":         "ศาลปกครอง",
+    "iptc.go.th":               "ศาลทรัพย์สินทางปัญญา",
+    "labourtribunal.go.th":     "ศาลแรงงาน",
     "krisdika.go.th":           "สำนักงานกฤษฎีกา",
     "law.go.th":                "ระบบกฎหมายไทย",
     "ratchakitcha.soc.go.th":   "ราชกิจจานุเบกษา",
@@ -75,13 +79,29 @@ def _build_queries(
     combined_text = f"{transcript} {notes} {doc_summaries}".strip()
     site_q = _site_filter()
 
-    # ── Query 1: ฎีกาตามประเภทคดี ──────────────────────────────────────────────
+    # ── Query 1: ฎีกา/คำพิพากษาตามประเภทคดี ────────────────────────────────────
     if case_type:
-        q = f"คำพิพากษาฎีกา {case_type}"
-        # ถ้าทุนทรัพย์สูง เพิ่มขนาดคดีเข้า query
-        if claim_amount and claim_amount >= 1_000_000:
-            q += " ทุนทรัพย์"
-        queries.append(f"{q} ({site_q})")
+        # ศาลเฉพาะทาง — ใช้ site filter ที่แคบกว่าเพื่อความแม่นยำ
+        LABOUR_TYPES = {"แรงงาน", "เลิกจ้าง", "ค่าชดเชย"}
+        IP_TYPES     = {"ทรัพย์สินทางปัญญา", "ลิขสิทธิ์", "สิทธิบัตร", "เครื่องหมายการค้า"}
+
+        if any(t in case_type for t in LABOUR_TYPES) or any(
+            re.search(t, combined_text) for t in [r"แรงงาน", r"เลิกจ้าง", r"ค่าชดเชย"]
+        ):
+            # คดีแรงงาน — เน้น labourtribunal + ฎีกาแรงงาน
+            labour_site = "site:labourtribunal.go.th OR site:deka.supremecourt.or.th"
+            queries.append(f"คำพิพากษา แรงงาน {case_type} ({labour_site})")
+        elif any(t in case_type for t in IP_TYPES) or any(
+            re.search(t, combined_text) for t in [r"ลิขสิทธิ์", r"สิทธิบัตร", r"เครื่องหมายการค้า"]
+        ):
+            # คดี IP — เน้น iptc + ฎีกา
+            ip_site = "site:iptc.go.th OR site:deka.supremecourt.or.th"
+            queries.append(f"คำพิพากษา ทรัพย์สินทางปัญญา {case_type} ({ip_site})")
+        else:
+            q = f"คำพิพากษาฎีกา {case_type}"
+            if claim_amount and claim_amount >= 1_000_000:
+                q += " ทุนทรัพย์"
+            queries.append(f"{q} ({site_q})")
 
     # ── Query 2: มาตรากฎหมายที่ปรากฏในเอกสาร ──────────────────────────────────
     law_sections = re.findall(
@@ -131,6 +151,10 @@ def _extract_legal_keywords(text: str) -> list[str]:
         r"ปกครอง", r"ใบอนุญาต", r"สัมปทาน", r"คำสั่งทางปกครอง",
         # แรงงาน
         r"แรงงาน", r"เลิกจ้าง", r"ค่าชดเชย", r"ค่าจ้าง", r"นายจ้าง",
+        r"ลูกจ้าง", r"สัญญาจ้าง", r"ค่าเสียหาย", r"สินจ้างแทนการบอกกล่าว",
+        # ทรัพย์สินทางปัญญา
+        r"ลิขสิทธิ์", r"สิทธิบัตร", r"เครื่องหมายการค้า", r"ความลับทางการค้า",
+        r"ละเมิดลิขสิทธิ์", r"ปลอมแปลง", r"การค้าระหว่างประเทศ",
     ]
     found = []
     for pat in patterns:
@@ -238,11 +262,13 @@ async def search_thai_legal(
         if "deka.supremecourt" in url:    return 0
         if "appeal.coj" in url:           return 1
         if "admincourt" in url:           return 2
-        if "krisdika" in url:             return 3
-        if "ratchakitcha" in url:         return 4
-        if "law.go.th" in url:            return 5
-        if "revenue.go.th" in url:        return 6
-        return 7
+        if "iptc.go.th" in url:           return 3
+        if "labourtribunal" in url:       return 4
+        if "krisdika" in url:             return 5
+        if "ratchakitcha" in url:         return 6
+        if "law.go.th" in url:            return 7
+        if "revenue.go.th" in url:        return 8
+        return 9
 
     merged.sort(key=_sort_rank)
     return merged[:12]   # max 12 ผล (เพิ่มจาก 10 เพราะมีแหล่งเพิ่ม)
@@ -263,11 +289,13 @@ def format_for_prompt(results: list[dict]) -> str:
     ]
 
     # จัดกลุ่ม
+    COURT_URLS = ["deka.supremecourt", "appeal.coj", "admincourt", "iptc.go.th", "labourtribunal"]
     deka     = [r for r in results if "deka.supremecourt" in r["url"]]
     appeal   = [r for r in results if "appeal.coj" in r["url"]]
     admin    = [r for r in results if "admincourt" in r["url"]]
-    laws     = [r for r in results if not any(
-                    x in r["url"] for x in ["deka.supremecourt", "appeal.coj", "admincourt"])]
+    iptc     = [r for r in results if "iptc.go.th" in r["url"]]
+    labour   = [r for r in results if "labourtribunal" in r["url"]]
+    laws     = [r for r in results if not any(x in r["url"] for x in COURT_URLS)]
 
     def _fmt_result(r: dict, i: int) -> list[str]:
         out = [f"{i}. **{r['title']}** [{r['source_label']}]"]
@@ -290,6 +318,16 @@ def format_for_prompt(results: list[dict]) -> str:
     if admin:
         lines.append("### 🏛️ คำพิพากษาศาลปกครอง:")
         for i, r in enumerate(admin, 1):
+            lines.extend(_fmt_result(r, i))
+
+    if iptc:
+        lines.append("### 💡 คำพิพากษาศาลทรัพย์สินทางปัญญาและการค้าระหว่างประเทศ:")
+        for i, r in enumerate(iptc, 1):
+            lines.extend(_fmt_result(r, i))
+
+    if labour:
+        lines.append("### 👷 คำพิพากษาศาลแรงงาน:")
+        for i, r in enumerate(labour, 1):
             lines.extend(_fmt_result(r, i))
 
     if laws:
