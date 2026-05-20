@@ -1683,9 +1683,22 @@ async def export_pdf(
 
     try:
         loop = asyncio.get_event_loop()
-        pdf_bytes: bytes = await loop.run_in_executor(
-            None,
-            functools.partial(generate_pdf, payload.markdown, lang, case_meta, payload.perspective),
+        # 100s hard cap on the executor thread so a stuck fpdf2 (font subset
+        # taking too long on huge CJK outputs, or runaway loop) can't tie up the
+        # worker indefinitely and starve other endpoints. Slightly less than the
+        # 120s client-side timeout so the user gets a clean 504 with a message
+        # instead of a bare "Failed to fetch" on the browser side.
+        pdf_bytes: bytes = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                functools.partial(generate_pdf, payload.markdown, lang, case_meta, payload.perspective),
+            ),
+            timeout=100.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="PDF render took longer than 100s — please try with a shorter analysis or retry shortly.",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
