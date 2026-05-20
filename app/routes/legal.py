@@ -454,40 +454,46 @@ def _pick_model(case: CaseInput, attachments: list[dict]) -> tuple[str, bool]:
         return SONNET, False  # คดีง่าย — Sonnet เร็วกว่า ถูกกว่า
 
 
-def _resize_image_for_claude(image_bytes: bytes, mime: str, max_dim: int = 1800) -> tuple[bytes, str]:
+def _resize_image_for_claude(image_bytes: bytes, mime: str, max_dim: int = 1800, name: str = "?") -> tuple[bytes, str]:
     """Resize an image to fit Claude's multi-image API limit.
 
     Anthropic returns 400 invalid_request_error when ANY image in a many-image
     request exceeds 2000px on either axis. We resize anything above ~1800px
-    (with a safety buffer) down, preserving aspect ratio. Returns (new_bytes,
-    new_mime) — mime stays as input if Pillow recognises the format, else
-    falls back to JPEG.
+    (with a safety buffer) down, preserving aspect ratio.
+    Verbose logging on every call so deploy issues (Pillow missing, etc.) are
+    immediately visible in Railway logs.
     """
     try:
         from PIL import Image
         import io
         img = Image.open(io.BytesIO(image_bytes))
-        # Quick exit: already within limits → don't recompress (preserves OCR quality)
-        if img.width <= max_dim and img.height <= max_dim:
+        w, h = img.width, img.height
+        if w <= max_dim and h <= max_dim:
+            print(f"[image-resize] {name}: {w}x{h} ≤ {max_dim} → no resize needed", flush=True)
             return image_bytes, mime
         # Resize with aspect-ratio preserved
         img.thumbnail((max_dim, max_dim), Image.LANCZOS)
-        # Re-encode. JPEG keeps file size small for photos; PNG/WEBP keeps for graphics.
+        nw, nh = img.width, img.height
         buf = io.BytesIO()
         if mime == "image/png":
-            # Preserve transparency
             img.save(buf, format="PNG", optimize=True)
-            return buf.getvalue(), "image/png"
-        if mime == "image/webp":
+            out_mime = "image/png"
+        elif mime == "image/webp":
             img.save(buf, format="WEBP", quality=85, method=4)
-            return buf.getvalue(), "image/webp"
-        # JPEG (default) — also handles HEIC/etc. after Pillow conversion
-        if img.mode in ("RGBA", "LA", "P"):
-            img = img.convert("RGB")
-        img.save(buf, format="JPEG", quality=85, optimize=True)
-        return buf.getvalue(), "image/jpeg"
+            out_mime = "image/webp"
+        else:
+            if img.mode in ("RGBA", "LA", "P"):
+                img = img.convert("RGB")
+            img.save(buf, format="JPEG", quality=85, optimize=True)
+            out_mime = "image/jpeg"
+        out_bytes = buf.getvalue()
+        print(f"[image-resize] {name}: {w}x{h} ({len(image_bytes):,}B) → {nw}x{nh} ({len(out_bytes):,}B, {out_mime})", flush=True)
+        return out_bytes, out_mime
+    except ImportError as e:
+        print(f"[image-resize] ✗ PILLOW NOT INSTALLED — install Pillow in container! ({e})", flush=True)
+        return image_bytes, mime
     except Exception as e:
-        print(f"[image-resize] failed ({type(e).__name__}: {e}) — sending original")
+        print(f"[image-resize] ✗ {name}: {type(e).__name__}: {e} — sending original", flush=True)
         return image_bytes, mime
 
 
@@ -525,11 +531,9 @@ def _build_content_blocks(prompt: str, attachments: list[dict]) -> list:
             img_bytes = att["bytes"]
             img_mime = att["mime"]
             if needs_resize:
-                orig_size = len(img_bytes)
-                img_bytes, img_mime = _resize_image_for_claude(img_bytes, img_mime, max_dim=1800)
-                new_size = len(img_bytes)
-                if new_size != orig_size:
-                    print(f"[image-resize] {att['name']}: {orig_size:,}B → {new_size:,}B ({img_mime})")
+                img_bytes, img_mime = _resize_image_for_claude(
+                    img_bytes, img_mime, max_dim=1800, name=att.get("name", "?")
+                )
             b64 = base64.standard_b64encode(img_bytes).decode("ascii")
             blocks.append({
                 "type": "image",
