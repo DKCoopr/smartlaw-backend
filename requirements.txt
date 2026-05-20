@@ -36,3 +36,11 @@ python-docx==1.1.2
 
 # PDF page counting (for page-based document limit)
 pypdf==4.2.0
+
+# Server-side PDF generation (pure Python, embeds TTF fonts — no system deps)
+fpdf2==2.7.9
+beautifulsoup4==4.12.3
+
+# Image resizing before sending to Claude — Anthropic enforces ≤2000px per
+# dimension when many images are in one request (Error 400 invalid_request_error).
+Pillow==10.4.0

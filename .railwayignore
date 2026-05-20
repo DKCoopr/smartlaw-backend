@@ -1,0 +1,14 @@
+# Don't upload these to Railway — they're build artifacts / local-only
+scripts/immigration_scraper/raw_chunks.jsonl
+scripts/immigration_scraper/*.log
+scripts/immigration_scraper/__pycache__/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.local
+.DS_Store
+*.swp
+node_modules/

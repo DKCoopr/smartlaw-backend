@@ -278,7 +278,7 @@ def _build_docx(analysis_md: str, meta: CaseMeta) -> bytes:
     today_th = datetime.now().strftime("%d/%m/%Y")
     _cover_para(doc, f"มุมมอง: {persp}  ·  จัดทำวันที่ {today_th}",
                 size=10, space_after=24)
-    _cover_para(doc, "— Smart Law · Legal Memo —",
+    _cover_para(doc, "— Thai.Law · Legal Memo —",
                 size=9, bold=True, space_after=0)
 
     doc.add_page_break()
@@ -341,7 +341,7 @@ async def export_analysis(
             "file_size":     len(blob),
             "storage_path":  storage_path,
             "is_processed":  True,
-            "ai_summary":    "บทสรุปคดีและแนวทางต่อสู้ขั้นสุด (Smart Law Legal Memo)",
+            "ai_summary":    "บทสรุปคดีและแนวทางต่อสู้ขั้นสุด (Thai.Law Legal Memo)",
             "folder":        (payload.save_to.folder or None),
         }
         try:

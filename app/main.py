@@ -1,5 +1,5 @@
 """
-SmartLaw Backend — FastAPI Application Entry Point
+Thai.Law Backend — FastAPI Application Entry Point
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +15,7 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     import os
-    print("🚀 SmartLaw API starting up...")
+    print("🚀 Thai.Law API starting up...")
     print(f"   RAW APP_ENV from os.environ: {os.environ.get('APP_ENV', 'NOT_FOUND')}")
     print(f"   RAW ANTHROPIC from os.environ: {os.environ.get('ANTHROPIC_API_KEY', 'NOT_FOUND')[:10] if os.environ.get('ANTHROPIC_API_KEY') else 'NOT_FOUND'}")
     print(f"   Environment: {settings.app_env}")
@@ -24,11 +24,11 @@ async def lifespan(app: FastAPI):
     print(f"   Claude:   {'✅ configured' if settings.anthropic_api_key else '❌ missing'}")
     print(f"   Gemini:   {'✅ configured' if settings.google_api_key else '❌ missing'}")
     yield
-    print("SmartLaw API shutting down...")
+    print("Thai.Law API shutting down...")
 
 
 app = FastAPI(
-    title="SmartLaw API",
+    title="Thai.Law API",
     description="Thai Legal AI — Voice to Police Report Pipeline",
     version="1.0.0",
     lifespan=lifespan,
@@ -67,7 +67,7 @@ app.include_router(admin.router)
 async def health():
     return {
         "status": "ok",
-        "service": "SmartLaw API",
+        "service": "Thai.Law API",
         "version": "1.0.0",
         "env": settings.app_env,
     }
@@ -76,7 +76,7 @@ async def health():
 @app.get("/")
 async def root():
     return {
-        "message": "SmartLaw API is running",
+        "message": "Thai.Law API is running",
         "docs": "/docs",
         "health": "/health",
     }

@@ -9,3 +9,4 @@ venv/
 *.log
 .DS_Store
 tmp/
+scripts/immigration_scraper/raw_chunks.jsonl

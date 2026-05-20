@@ -3,17 +3,23 @@ Claude analysis service — Step 2 of the AI pipeline
 Takes Gemini's extracted data + original transcript and performs
 deep Thai legal analysis: applicable laws, recommended steps, risk assessment.
 Uses Claude Sonnet 4.6 (fast + accurate for legal reasoning).
+
+RAG layer: before sending to Claude, we retrieve relevant immigration law
+chunks from Supabase pgvector and prepend them to the prompt so Claude
+has grounded, up-to-date Thai law to cite — not just training knowledge.
 """
 import anthropic
 from app.config import get_settings
+from app.services.law_retrieval import get_law_context_for_prompt
 
 settings = get_settings()
 client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 LEGAL_ANALYSIS_PROMPT = """
-คุณคือที่ปรึกษากฎหมายไทยผู้เชี่ยวชาญ ทำงานในระบบสมาร์ทลอว์
+คุณคือที่ปรึกษากฎหมายไทยผู้เชี่ยวชาญ ทำงานในระบบ Thai.Law
 วิเคราะห์คดีต่อไปนี้และให้คำแนะนำทางกฎหมายที่ครบถ้วนและถูกต้อง
 
+{law_context}
 == ข้อมูลคดี ==
 {case_summary}
 
@@ -61,9 +67,18 @@ VERIFICATION_PROMPT = """
 async def analyze_case(case_summary: str) -> dict:
     """
     Run Claude legal analysis on the extracted case data.
-    Returns { legal_text, steps, risk, raw_response }
+    RAG: retrieves relevant Thai immigration law chunks from Supabase
+    and injects them into the prompt before sending to Claude.
+    Returns { legal_text, steps, risk, raw_response, rag_chunks_used }
     """
-    prompt = LEGAL_ANALYSIS_PROMPT.format(case_summary=case_summary)
+    # ── RAG: retrieve relevant law before hitting Claude ───────────────────
+    law_context = await get_law_context_for_prompt(case_summary, lang="th")
+    rag_used = bool(law_context)
+
+    prompt = LEGAL_ANALYSIS_PROMPT.format(
+        case_summary=case_summary,
+        law_context=law_context,   # empty string if not immigration-related
+    )
 
     message = await client.messages.create(
         model="claude-sonnet-4-6",
@@ -83,6 +98,7 @@ async def analyze_case(case_summary: str) -> dict:
         "steps": steps,
         "risk": risk,
         "raw_response": analysis_text,
+        "rag_chunks_used": rag_used,   # flag so frontend can show "📚 อ้างอิงกฎหมาย ตม."
     }
 
 

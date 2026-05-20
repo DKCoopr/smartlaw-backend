@@ -1,5 +1,5 @@
 """
-SmartLaw AI Pipeline Orchestrator
+Thai.Law AI Pipeline Orchestrator
 ──────────────────────────────────────────────────────────────────
 Pipeline stages:
   1. Gemini Flash  → extract structured fields from Thai transcript
