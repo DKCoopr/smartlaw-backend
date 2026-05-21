@@ -232,6 +232,10 @@ def _draw_logo(pdf, top_y: float = 36) -> float:
             pdf.rect(x, y, bar_w, h, "F")
 
     # ── "Thai.Law" wordmark ──
+    # set_x(0) BEFORE EACH cell so the A4_W-wide cell is anchored at the page
+    # edge — `cell(...,ln=1)` resets x to the left margin (not 0) on the next
+    # line, which silently shifts subsequent A4_W cells 16mm to the right and
+    # made the subtitle look off-center under the wordmark.
     text_y = top_y + max_h + 5
     pdf.set_xy(0, text_y)
     pdf.set_font("Main", "B", 22)
@@ -239,6 +243,7 @@ def _draw_logo(pdf, top_y: float = 36) -> float:
     pdf.cell(A4_W, 9, "Thai.Law", align="C", ln=1)
 
     # ── "Legal Assistant" subtitle (letter-spaced, centered) ──
+    pdf.set_x(0)
     pdf.set_font("Main", "B", 8)
     pdf.set_text_color(*LOGO_SUB)
     pdf.cell(A4_W, 4, "L E G A L   A S S I S T A N T", align="C", ln=1)
@@ -819,7 +824,7 @@ def _add_closing_cover(pdf, lang: str) -> None:
     # which we can keep drawing.
     after_logo_y = _draw_logo(pdf, top_y=95)
 
-    pdf.set_y(after_logo_y + 8)
+    pdf.set_xy(0, after_logo_y + 8)
     thanks = {
         "th": "ขอบคุณที่ใช้บริการ",
         "en": "Thank you for using Thai.Law",
@@ -832,7 +837,9 @@ def _add_closing_cover(pdf, lang: str) -> None:
     }.get(lang, "Thank you for using Thai.Law")
     pdf.set_font("Main", "B", 14)
     pdf.set_text_color(*DARK)
-    pdf.cell(0, 8, thanks, align="C", new_x="LMARGIN", new_y="NEXT")
+    # Same anchor-at-0 trick so the cell spans the whole page width and
+    # `align="C"` centers on the page itself (not on the left-margin-offset).
+    pdf.cell(A4_W, 8, thanks, align="C", new_x="LMARGIN", new_y="NEXT")
     # (Disclaimer paragraph removed per UX request — the cover page on page 1
     # already carries the same warning; repeating it here was visual noise.)
     # Date stamp at the bottom of the closing page.
