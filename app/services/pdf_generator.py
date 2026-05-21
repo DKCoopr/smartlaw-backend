@@ -28,21 +28,62 @@ FONTS_DIR = os.environ.get("PDF_FONTS_DIR", "/app/fonts")
 #                                    server-side font lacks coverage the
 #                                    diagram may have placeholder glyphs.
 #                                    Still better than nothing.
+def _preprocess_mermaid(code: str) -> str:
+    """
+    Claude often emits `\\n` inside Mermaid node labels expecting it to render
+    as a line break. Modern Mermaid actually wants `<br/>` (or `<br>`) for that
+    — bare `\\n` ends up rendered as the literal characters "\\n" in the SVG
+    text node. Pre-process to convert.
+
+    Also strip carriage returns (some SSE streams add \\r at line endings).
+    """
+    if not code:
+        return code
+    s = code.replace("\r", "")
+    # Inside node labels Claude commonly writes: A["line one\nline two"]
+    # → convert to: A["line one<br/>line two"]
+    # We do a simple global replace because \n inside Mermaid edge labels and
+    # node text is the only legitimate place it appears (Mermaid syntax itself
+    # uses actual newlines for statement separation, not \n escape).
+    s = s.replace("\\n", "<br/>")
+    return s
+
+
 def _render_mermaid_to_png(code: str, timeout_s: float = 15.0) -> bytes:
     """
     POST to mermaid.ink and return PNG bytes for the given Mermaid source.
     Raises on failure so the caller can decide whether to skip silently.
     """
     import httpx  # local import — already in requirements but avoid top-level
+    cleaned = _preprocess_mermaid(code)
     state = {
-        "code": code,
-        "mermaid": {"theme": "default"},
+        "code": cleaned,
+        "mermaid": {
+            "theme": "base",  # "base" lets us inject themeVariables for branded look
+            "themeVariables": {
+                "primaryColor":        "#EFF4FF",   # light blue-tint node fill
+                "primaryTextColor":    "#0F1A4A",   # navy text
+                "primaryBorderColor":  "#1D4ED8",   # blue border
+                "lineColor":           "#3C6890",   # blue arrows
+                "secondaryColor":      "#F8FAFC",
+                "tertiaryColor":       "#FFFFFF",
+                "fontFamily":          "Sarabun, 'Noto Sans Thai', sans-serif",
+                "fontSize":            "14px",
+            },
+            "flowchart": {
+                "useMaxWidth": True,
+                "htmlLabels":  True,   # required for <br/> line breaks
+                "curve":       "basis",
+            },
+        },
         "autoSync": True,
         "rough": False,
     }
     payload = json.dumps(state).encode("utf-8")
     encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
-    url = f"https://mermaid.ink/img/{encoded}?type=png&bgColor=ffffff"
+    # scale=2 gives a higher-resolution PNG so it stays crisp when fpdf2
+    # rescales it to fit the content width.
+    url = f"https://mermaid.ink/img/{encoded}?type=png&bgColor=ffffff&scale=2"
     with httpx.Client(timeout=timeout_s, follow_redirects=True) as client:
         r = client.get(url)
         r.raise_for_status()
@@ -621,14 +662,47 @@ def _render_markdown(pdf, markdown: str) -> None:
                         png_bytes = _render_mermaid_to_png(code_str)
                         if png_bytes:
                             import io as _io
-                            img_buf = _io.BytesIO(png_bytes)
-                            # Center the diagram, cap width to content area
-                            pdf.ln(2)
                             try:
-                                pdf.image(img_buf, x=MARGIN_L, w=CONTENT_W)
+                                # Measure the image so we can decide whether
+                                # it fits on the remaining page or needs a
+                                # fresh page. Without this the image was being
+                                # cropped at the page boundary.
+                                from PIL import Image as _PIL
+                                _img = _PIL.open(_io.BytesIO(png_bytes))
+                                px_w, px_h = _img.size
+                                # Convert pixels to mm at 96 DPI (Mermaid's
+                                # default render DPI) — then scale to fit
+                                # CONTENT_W while preserving aspect ratio.
+                                px_to_mm = 25.4 / 96.0
+                                nat_w_mm = px_w * px_to_mm
+                                nat_h_mm = px_h * px_to_mm
+                                scale = min(1.0, CONTENT_W / nat_w_mm) if nat_w_mm > 0 else 1.0
+                                # Also cap to 60% of page height so it never
+                                # eats an entire page (looks bad for any chart
+                                # taller than a small flowchart).
+                                max_h_mm = (A4_H - MARGIN_T - MARGIN_B) * 0.85
+                                scale = min(scale, max_h_mm / nat_h_mm) if nat_h_mm > 0 else scale
+                                target_w = nat_w_mm * scale
+                                target_h = nat_h_mm * scale
+                                # Check remaining vertical space — if image
+                                # won't fit, start a new page so it lands
+                                # whole instead of being cropped at the edge.
+                                remaining = (A4_H - MARGIN_B) - pdf.get_y()
+                                if target_h > remaining - 4:
+                                    pdf.add_page()
+                                # Center horizontally
+                                cx = MARGIN_L + (CONTENT_W - target_w) / 2.0
+                                pdf.ln(2)
+                                pdf.image(_io.BytesIO(png_bytes), x=cx, w=target_w, h=target_h)
+                                pdf.ln(3)
+                            except ImportError:
+                                # No Pillow installed — fall back to fixed width,
+                                # let fpdf2 auto-compute height. May still crop.
+                                pdf.ln(2)
+                                pdf.image(_io.BytesIO(png_bytes), x=MARGIN_L, w=CONTENT_W)
+                                pdf.ln(3)
                             except Exception as img_err:
                                 print(f"[pdf_generator] mermaid image embed failed: {img_err}")
-                            pdf.ln(3)
                     except Exception as render_err:
                         print(f"[pdf_generator] mermaid render skipped: {render_err}")
             else:
