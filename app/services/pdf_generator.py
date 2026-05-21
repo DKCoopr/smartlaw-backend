@@ -8,86 +8,10 @@ Uses Sarabun (Thai+Latin) so dates, numbers, and Thai text all render correctly.
 
 import re
 import os
-import json
-import base64
 from datetime import datetime
 
 FONTS_DIR = os.environ.get("PDF_FONTS_DIR", "/app/fonts")
 
-
-# ── Mermaid → PNG renderer (uses public mermaid.ink service) ─────────────────
-# We render Mermaid diagrams as PNG images server-side and embed them in the
-# PDF. mermaid.ink is a free, no-auth-required service that accepts a base64
-# payload of {code, mermaid:{theme:...}} and returns a rendered PNG.
-#
-# Failure modes (all handled silently — never break the PDF build):
-#   • Network error / service down → caller catches, no image emitted
-#   • Mermaid syntax invalid       → mermaid.ink returns 400, we re-raise →
-#                                    caller catches → no image
-#   • Thai chars in node labels    → mermaid.ink supports UTF-8, but if the
-#                                    server-side font lacks coverage the
-#                                    diagram may have placeholder glyphs.
-#                                    Still better than nothing.
-def _preprocess_mermaid(code: str) -> str:
-    """
-    Claude often emits `\\n` inside Mermaid node labels expecting it to render
-    as a line break. Modern Mermaid actually wants `<br/>` (or `<br>`) for that
-    — bare `\\n` ends up rendered as the literal characters "\\n" in the SVG
-    text node. Pre-process to convert.
-
-    Also strip carriage returns (some SSE streams add \\r at line endings).
-    """
-    if not code:
-        return code
-    s = code.replace("\r", "")
-    # Inside node labels Claude commonly writes: A["line one\nline two"]
-    # → convert to: A["line one<br/>line two"]
-    # We do a simple global replace because \n inside Mermaid edge labels and
-    # node text is the only legitimate place it appears (Mermaid syntax itself
-    # uses actual newlines for statement separation, not \n escape).
-    s = s.replace("\\n", "<br/>")
-    return s
-
-
-def _render_mermaid_to_png(code: str, timeout_s: float = 15.0) -> bytes:
-    """
-    POST to mermaid.ink and return PNG bytes for the given Mermaid source.
-    Raises on failure so the caller can decide whether to skip silently.
-    """
-    import httpx  # local import — already in requirements but avoid top-level
-    cleaned = _preprocess_mermaid(code)
-    state = {
-        "code": cleaned,
-        "mermaid": {
-            "theme": "base",  # "base" lets us inject themeVariables for branded look
-            "themeVariables": {
-                "primaryColor":        "#EFF4FF",   # light blue-tint node fill
-                "primaryTextColor":    "#0F1A4A",   # navy text
-                "primaryBorderColor":  "#1D4ED8",   # blue border
-                "lineColor":           "#3C6890",   # blue arrows
-                "secondaryColor":      "#F8FAFC",
-                "tertiaryColor":       "#FFFFFF",
-                "fontFamily":          "Sarabun, 'Noto Sans Thai', sans-serif",
-                "fontSize":            "14px",
-            },
-            "flowchart": {
-                "useMaxWidth": True,
-                "htmlLabels":  True,   # required for <br/> line breaks
-                "curve":       "basis",
-            },
-        },
-        "autoSync": True,
-        "rough": False,
-    }
-    payload = json.dumps(state).encode("utf-8")
-    encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
-    # scale=2 gives a higher-resolution PNG so it stays crisp when fpdf2
-    # rescales it to fit the content width.
-    url = f"https://mermaid.ink/img/{encoded}?type=png&bgColor=ffffff&scale=2"
-    with httpx.Client(timeout=timeout_s, follow_redirects=True) as client:
-        r = client.get(url)
-        r.raise_for_status()
-        return r.content
 
 # Colours (R, G, B)
 BLUE       = (29,  78, 216)
@@ -579,17 +503,8 @@ def _render_md_table(pdf, table_lines: list) -> None:
 
 # ── Markdown content renderer ─────────────────────────────────────────────────
 
-def _render_markdown(pdf, markdown: str, flowcharts: list | None = None) -> None:
-    """Parse markdown line-by-line and emit fpdf2 output directly.
-
-    `flowcharts` is a list of base64 PNG strings. The markdown may contain
-    `<!--MERMAID_PNG:N-->` placeholders that we swap for the corresponding
-    image (`flowcharts[N]`), embedded inline at that point. Missing/invalid
-    indices are silently skipped so a stale marker can never break the build.
-    """
-    import base64 as _b64
-    import io as _io
-    flowcharts = flowcharts or []
+def _render_markdown(pdf, markdown: str) -> None:
+    """Parse markdown line-by-line and emit fpdf2 output directly."""
 
     HSIZES  = {"#": 17, "##": 14, "###": 12, "####": 11}
     HCOLORS = {"#": BLUE, "##": GREEN, "###": DARK, "####": DARK}
@@ -621,50 +536,6 @@ def _render_markdown(pdf, markdown: str, flowcharts: list | None = None) -> None
         # Blank line
         if not line.strip():
             pdf.ln(2)
-            i += 1
-            continue
-
-        # ── Flowchart placeholder ───────────────────────────────────────────
-        # The frontend pre-renders Mermaid blocks to PNG (using the same
-        # mermaid library that powers the on-screen UI) and replaces each
-        # fenced block with `<!--MERMAID_PNG:N-->`. We embed flowcharts[N]
-        # here. Stale/missing indices fall through to plain text (which is
-        # an HTML comment — invisible to a real Markdown reader, harmless).
-        mmd_m = re.match(r"^\s*<!--MERMAID_PNG:(\d+)-->\s*$", line)
-        if mmd_m:
-            idx = int(mmd_m.group(1))
-            if 0 <= idx < len(flowcharts):
-                try:
-                    png_bytes = _b64.b64decode(flowcharts[idx])
-                    # Reuse the same image-fit logic as the inline mermaid
-                    # render path: measure with Pillow, scale to content
-                    # width, cap to 85% of page height, page-break if it
-                    # won't fit on the current page.
-                    try:
-                        from PIL import Image as _PIL
-                        _img = _PIL.open(_io.BytesIO(png_bytes))
-                        px_w, px_h = _img.size
-                        px_to_mm = 25.4 / 96.0
-                        nat_w_mm = px_w * px_to_mm
-                        nat_h_mm = px_h * px_to_mm
-                        scale = min(1.0, CONTENT_W / nat_w_mm) if nat_w_mm > 0 else 1.0
-                        max_h_mm = (A4_H - MARGIN_T - MARGIN_B) * 0.85
-                        scale = min(scale, max_h_mm / nat_h_mm) if nat_h_mm > 0 else scale
-                        target_w = nat_w_mm * scale
-                        target_h = nat_h_mm * scale
-                        remaining = (A4_H - MARGIN_B) - pdf.get_y()
-                        if target_h > remaining - 4:
-                            pdf.add_page()
-                        cx = MARGIN_L + (CONTENT_W - target_w) / 2.0
-                        pdf.ln(2)
-                        pdf.image(_io.BytesIO(png_bytes), x=cx, w=target_w, h=target_h)
-                        pdf.ln(3)
-                    except ImportError:
-                        pdf.ln(2)
-                        pdf.image(_io.BytesIO(png_bytes), x=MARGIN_L, w=CONTENT_W)
-                        pdf.ln(3)
-                except Exception as e:
-                    print(f"[pdf_generator] flowchart {idx} embed failed: {e}")
             i += 1
             continue
 
@@ -706,58 +577,13 @@ def _render_markdown(pdf, markdown: str, flowcharts: list | None = None) -> None
                 j += 1
             code_lines = lines[i + 1:j]
             if lang in ("mermaid", "mmd"):
-                # Render Mermaid → PNG via the public mermaid.ink service and
-                # embed the image. Falls back to silent skip if the service is
-                # unreachable / Mermaid is invalid / etc — never dump raw source.
-                code_str = "\n".join(code_lines).strip()
-                if code_str:
-                    try:
-                        png_bytes = _render_mermaid_to_png(code_str)
-                        if png_bytes:
-                            import io as _io
-                            try:
-                                # Measure the image so we can decide whether
-                                # it fits on the remaining page or needs a
-                                # fresh page. Without this the image was being
-                                # cropped at the page boundary.
-                                from PIL import Image as _PIL
-                                _img = _PIL.open(_io.BytesIO(png_bytes))
-                                px_w, px_h = _img.size
-                                # Convert pixels to mm at 96 DPI (Mermaid's
-                                # default render DPI) — then scale to fit
-                                # CONTENT_W while preserving aspect ratio.
-                                px_to_mm = 25.4 / 96.0
-                                nat_w_mm = px_w * px_to_mm
-                                nat_h_mm = px_h * px_to_mm
-                                scale = min(1.0, CONTENT_W / nat_w_mm) if nat_w_mm > 0 else 1.0
-                                # Also cap to 60% of page height so it never
-                                # eats an entire page (looks bad for any chart
-                                # taller than a small flowchart).
-                                max_h_mm = (A4_H - MARGIN_T - MARGIN_B) * 0.85
-                                scale = min(scale, max_h_mm / nat_h_mm) if nat_h_mm > 0 else scale
-                                target_w = nat_w_mm * scale
-                                target_h = nat_h_mm * scale
-                                # Check remaining vertical space — if image
-                                # won't fit, start a new page so it lands
-                                # whole instead of being cropped at the edge.
-                                remaining = (A4_H - MARGIN_B) - pdf.get_y()
-                                if target_h > remaining - 4:
-                                    pdf.add_page()
-                                # Center horizontally
-                                cx = MARGIN_L + (CONTENT_W - target_w) / 2.0
-                                pdf.ln(2)
-                                pdf.image(_io.BytesIO(png_bytes), x=cx, w=target_w, h=target_h)
-                                pdf.ln(3)
-                            except ImportError:
-                                # No Pillow installed — fall back to fixed width,
-                                # let fpdf2 auto-compute height. May still crop.
-                                pdf.ln(2)
-                                pdf.image(_io.BytesIO(png_bytes), x=MARGIN_L, w=CONTENT_W)
-                                pdf.ln(3)
-                            except Exception as img_err:
-                                print(f"[pdf_generator] mermaid image embed failed: {img_err}")
-                    except Exception as render_err:
-                        print(f"[pdf_generator] mermaid render skipped: {render_err}")
+                # Mermaid flowcharts are intentionally skipped in PDF output.
+                # We tried server-side rendering (mermaid.ink → PNG) and
+                # browser pre-rendering through several iterations — both kept
+                # producing layout / sizing issues. The user prefers PDFs
+                # without flowcharts to PDFs with broken flowcharts. The
+                # on-screen UI still renders Mermaid as interactive SVG.
+                pass
             else:
                 # Generic code block — render as monospace tinted box
                 pdf.ln(1)
@@ -865,14 +691,7 @@ def generate_pdf(
     lang: str = "th",
     case_meta: dict | None = None,
     perspective: str = "",
-    flowcharts: list | None = None,
 ) -> bytes:
-    """
-    `flowcharts` — list of base64-encoded PNG strings (no data: prefix).
-    They are referenced in `markdown` via `<!--MERMAID_PNG:N-->` placeholders
-    that the frontend emits in place of each original ```mermaid block. The
-    renderer looks each one up by index and embeds via pdf.image().
-    """
     meta = case_meta or {}
     case_title = meta.get("title") or "Thai.Law Analysis"
 
@@ -880,7 +699,7 @@ def generate_pdf(
     _add_cover(pdf, case_title, meta, perspective, lang)
 
     pdf.add_page()
-    _render_markdown(pdf, markdown, flowcharts or [])
+    _render_markdown(pdf, markdown)
 
     # Footer
     pdf.ln(6)

@@ -809,19 +809,19 @@ def _financial_only_prompt(case: CaseInput, language: str = "th") -> str:
 
 **สร้างเป็นตาราง markdown แบบนี้เป๊ะๆ** — เลือกใช้ table แทน text-art เพราะ render ได้เสถียรทุก format (UI / PDF / DOCX)
 
-| ลำดับ | วันที่ | เหตุการณ์ | จำนวนเงิน | จุดวิกฤต |
-| --- | --- | --- | --- | --- |
-| ๑ | dd/mm/yyyy | สรุปเหตุการณ์เป็นประโยคเดียว | ฿ จำนวน | — |
-| ๒ | dd/mm/yyyy | สรุปเหตุการณ์เป็นประโยคเดียว | ฿ จำนวน | ⚡ |
-| ๓ | dd/mm/yyyy | สรุปเหตุการณ์เป็นประโยคเดียว | ฿ จำนวน | — |
+| ลำดับ | วันที่ | เหตุการณ์ | จำนวนเงิน |
+| --- | --- | --- | --- |
+| ๑ | dd/mm/yyyy | สรุปเหตุการณ์เป็นประโยคเดียว | ฿ จำนวน |
+| ๒ | dd/mm/yyyy | สรุปเหตุการณ์เป็นประโยคเดียว | ฿ จำนวน |
+| ๓ | dd/mm/yyyy | สรุปเหตุการณ์เป็นประโยคเดียว | ฿ จำนวน |
 
 **กฎตาราง Timeline:**
 - คอลัมน์ **ลำดับ** ใช้เลขไทย (๑ ๒ ๓ ๔ ๕ ๖ ๗ ๘) เรียงจากเก่าไปใหม่
 - คอลัมน์ **วันที่** ใช้รูปแบบ dd/mm/yyyy (ปี พ.ศ.) — ถ้าไม่ระบุชัด เขียน "ไม่ระบุ — ก่อน/หลัง [เหตุการณ์]"
-- คอลัมน์ **เหตุการณ์** ประโยคเดียวกระชับ ≤30 คำ
+- คอลัมน์ **เหตุการณ์** ประโยคเดียวกระชับ ≤30 คำ — ถ้าเป็นจุดวิกฤต (ผิดนัด / ฟ้อง / ยกคำร้อง) เขียนคำว่า **"จุดวิกฤต:"** ขึ้นต้น
 - คอลัมน์ **จำนวนเงิน** ใส่ ฿ + เครื่องหมายจุลภาคพันหลัก (฿1,500,000) — ถ้าไม่เกี่ยวกับเงินใส่ "—"
-- คอลัมน์ **จุดวิกฤต** ใส่ ⚡ ที่แถวจุดวิกฤต (ผิดนัด / โอนต้องสงสัย / ฟ้อง / ยกคำร้อง) — ปกติใส่ "—"
 - **ขั้นต่ำ 3 แถว สูงสุด 8 แถว** ถ้าน้อยกว่า 3 แถว — ข้ามทั้ง section 3 ไป
+- **ไม่ต้องมีคอลัมน์ "จุดวิกฤต"** แยก — เพราะวิเคราะห์เฉพาะการเงิน ทุกแถวถือว่าสำคัญทางการเงินอยู่แล้ว
 
 #### 3.2 Flowchart Mermaid (Optional — ใส่เฉพาะมี branching จริง)
 
@@ -1771,14 +1771,6 @@ class ExportPdfRequest(BaseModel):
     court: str = ""
     case_number: str = ""
     claim_amount: float = 0.0
-    # Pre-rendered Mermaid flowcharts as base64 PNG strings (no data: prefix).
-    # The frontend renders Mermaid in the browser (where it works perfectly
-    # for the on-screen UI) and ships the resulting PNGs here. They're keyed
-    # by index — placeholder comments `<!--MERMAID_PNG:N-->` in `markdown`
-    # tell the PDF generator where to embed each one. Empty list = no
-    # flowcharts in this analysis (or rendering failed client-side); the
-    # generator just ignores any markers it can't resolve.
-    flowcharts: List[str] = []
 
 @router.post("/export-pdf")
 async def export_pdf(
@@ -1814,16 +1806,7 @@ async def export_pdf(
         pdf_bytes: bytes = await asyncio.wait_for(
             loop.run_in_executor(
                 None,
-                functools.partial(
-                    generate_pdf,
-                    payload.markdown,
-                    lang,
-                    case_meta,
-                    payload.perspective,
-                    # Browser-rendered Mermaid PNGs, indexed by the
-                    # `<!--MERMAID_PNG:N-->` markers in the markdown.
-                    payload.flowcharts,
-                ),
+                functools.partial(generate_pdf, payload.markdown, lang, case_meta, payload.perspective),
             ),
             timeout=100.0,
         )
