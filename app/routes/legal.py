@@ -1771,6 +1771,14 @@ class ExportPdfRequest(BaseModel):
     court: str = ""
     case_number: str = ""
     claim_amount: float = 0.0
+    # Pre-rendered Mermaid flowcharts as base64 PNG strings (no data: prefix).
+    # The frontend renders Mermaid in the browser (where it works perfectly
+    # for the on-screen UI) and ships the resulting PNGs here. They're keyed
+    # by index — placeholder comments `<!--MERMAID_PNG:N-->` in `markdown`
+    # tell the PDF generator where to embed each one. Empty list = no
+    # flowcharts in this analysis (or rendering failed client-side); the
+    # generator just ignores any markers it can't resolve.
+    flowcharts: List[str] = []
 
 @router.post("/export-pdf")
 async def export_pdf(
@@ -1806,7 +1814,16 @@ async def export_pdf(
         pdf_bytes: bytes = await asyncio.wait_for(
             loop.run_in_executor(
                 None,
-                functools.partial(generate_pdf, payload.markdown, lang, case_meta, payload.perspective),
+                functools.partial(
+                    generate_pdf,
+                    payload.markdown,
+                    lang,
+                    case_meta,
+                    payload.perspective,
+                    # Browser-rendered Mermaid PNGs, indexed by the
+                    # `<!--MERMAID_PNG:N-->` markers in the markdown.
+                    payload.flowcharts,
+                ),
             ),
             timeout=100.0,
         )
