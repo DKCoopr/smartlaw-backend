@@ -102,6 +102,13 @@ class AnalyzeIn(BaseModel):
     case_id: Optional[str] = None
     doc_ids: Optional[List[str]] = None    # if set: only analyze these docs (subset)
     language: str = "th"                   # th | en | zh — response language
+    # analysis_mode:
+    #   "full"            — default, full sectioned legal analysis (current behavior)
+    #   "financial_only"  — swap to a compact financial-transactions-only output
+    #                       (short summary + table + timeline / flowchart). The
+    #                       frontend exposes this via the "วิเคราะห์เฉพาะการเงิน"
+    #                       opt-in checkbox.
+    analysis_mode: str = "full"
 
 
 def _case_block(case: CaseInput) -> str:
@@ -751,6 +758,81 @@ Bien que le modèle ci-dessus utilise le thaï (titres de section, instructions,
 """,
 }
 
+def _financial_only_prompt(case: CaseInput, language: str = "th") -> str:
+    """
+    Compact, single-mode prompt: skip the full sectioned analysis and produce a
+    short financial-transactions-only summary. Output is markdown:
+      1. ~80-word "What is this case about, financially" paragraph
+      2. Markdown table of every money transfer / payment / loan / claim with
+         columns: ลำดับ | วันที่ | ผู้จ่าย → ผู้รับ | จำนวนเงิน | ประเภทรายการ | หลักฐาน
+      3. Timeline OR flowchart (Mermaid block) — pick whichever fits the data
+         shape better: timeline for sequential flows, flowchart for branched/
+         conditional flows (e.g. "loan → default → guarantor → recovery").
+    No other sections — keep it tight and copy-paste ready into client memos.
+    """
+    lang_note = LANG_INSTRUCTION.get(language, "")
+    lang_tail = LANG_FINAL_REMINDER.get(language, "")
+    plaintiff = case.plaintiff_name or "(โจทก์)"
+    defendant = case.defendant_name or "(จำเลย)"
+    return f"""{lang_note}
+คุณคือทนายความวิเคราะห์ **เฉพาะธุรกรรมการเงิน** ในคดีนี้
+
+== ข้อมูลคดี ==
+{_case_block(case)}
+
+== สิ่งที่ต้องตอบ — เท่านี้ ห้ามเกิน ==
+
+### 1. สรุปย่อ (2-3 ประโยค)
+- ใจความ: เงินไหลจาก {plaintiff} ↔ {defendant} อย่างไร และจุดสำคัญทางการเงินของคดีคืออะไร
+- ห้ามเกิน 80 คำ
+
+### 2. ตารางธุรกรรมการเงิน
+สร้างตาราง markdown ของธุรกรรมการเงินที่ปรากฏในคดี **ขั้นต่ำ 5 รายการ** (ถ้าน้อยกว่าให้สร้างจาก context):
+
+| ลำดับ | วันที่ | จาก → ถึง | จำนวนเงิน (บาท) | ประเภท | หลักฐาน / ที่มา |
+| --- | --- | --- | --- | --- | --- |
+| ๑ | dd/mm/yyyy | A → B | ฿xxx,xxx | กู้ยืม / ชำระหนี้ / โอน / ค่าจ้าง / ค่าปรับ ฯลฯ | ใบเสร็จเลข X / สัญญาข้อ Y / สเตทเมนต์ |
+
+**กฎ:**
+- ใช้เลขไทย (๑ ๒ ๓...) ในคอลัมน์ลำดับ
+- ใส่เครื่องหมาย ฿ และจุลภาคทุกหลักพัน (เช่น ฿1,500,000)
+- ถ้าวันที่ไม่ระบุ ให้เขียน "ไม่ระบุ — ก่อน/หลัง [เหตุการณ์]"
+- เรียงจาก **เก่าไปใหม่** ตาม chronological order
+
+### 3. Timeline หรือ Flowchart — เลือก 1 อย่าง (ตามความเหมาะสม)
+
+**ถ้าธุรกรรมเป็น sequential** (เกิดต่อเนื่องเป็นลำดับเวลา) — ใช้ **Timeline**:
+```
+📅 dd/mm/yyyy  ➜  เหตุการณ์ทางการเงิน 1
+       ↓
+📅 dd/mm/yyyy  ➜  เหตุการณ์ทางการเงิน 2
+       ↓
+📅 dd/mm/yyyy  ➜  เหตุการณ์ทางการเงิน 3 (จุดวิกฤต ⚡)
+```
+
+**ถ้าธุรกรรมมีเงื่อนไข / มีการแตกสาขา** (เช่น กู้ → ผิดนัด → ค้ำประกัน → ฟ้อง) — ใช้ **Mermaid flowchart**:
+```mermaid
+flowchart TD
+    A[จุดเริ่มต้น: A กู้ B ฿X เมื่อ dd/mm] -->|ครบกำหนด| B{{ชำระตรงเวลา?}}
+    B -->|ไม่| C[ผิดนัด ฿Y]
+    C --> D[ดอกเบี้ยสะสม ฿Z]
+    D --> E[ฟ้องเรียกหนี้]
+```
+
+**กฎ:**
+- เลือกแบบใดแบบหนึ่งเท่านั้น — ไม่ใส่ทั้งสอง
+- ใส่จำนวนเงินจริงในทุกโหนด/ทุกเส้น
+- ระบุ "จุดวิกฤต" (ผิดนัด / โอนต้องสงสัย / ทับซ้อน) ด้วย ⚡ หรือสีแดงใน Mermaid
+
+== สิ่งที่ห้ามทำ ==
+❌ ห้ามใส่หัวข้ออื่น เช่น ข้อกฎหมาย, คู่ความ, ทุนทรัพย์, จุดแข็ง/อ่อน, กลยุทธ์ — ผู้ใช้จะดูบทวิเคราะห์เต็มต่างหาก
+❌ ห้ามเขียนเป็นย่อหน้ายาว — ทุกอย่างต้องอยู่ใน 3 ส่วน: สรุปย่อ + ตาราง + timeline/flowchart
+❌ ห้ามตีความกฎหมาย — เน้นเฉพาะ "เงินไหลอย่างไร"
+
+{lang_tail}
+"""
+
+
 def _analysis_prompt(case: CaseInput, perspective: str, has_attachments: bool, language: str = "th") -> str:
     p_label = _perspective_label(perspective)
     directive = _perspective_directive(perspective, case.plaintiff_name or "", case.defendant_name or "")
@@ -1093,7 +1175,12 @@ async def _do_analyze(payload: "AnalyzeIn", user_id: str) -> dict:
         print(f"[legal/analyze] RAG retrieval failed (non-fatal): {e}")
 
     # 4. Build prompt — order: pgvector law → Brave search results → analysis template
-    base_prompt = _analysis_prompt(payload.case, payload.perspective, has_attachments=bool(attachments), language=case_lang_b)
+    # analysis_mode toggle: "financial_only" swaps the full sectioned prompt for
+    # a focused money-transactions output (table + timeline/flowchart only).
+    if payload.analysis_mode == "financial_only":
+        base_prompt = _financial_only_prompt(payload.case, language=case_lang_b)
+    else:
+        base_prompt = _analysis_prompt(payload.case, payload.perspective, has_attachments=bool(attachments), language=case_lang_b)
     legal_db_block = format_for_prompt(legal_search_results)
     prompt_parts_b = [p for p in [law_context_b, legal_db_block, base_prompt] if p]
     prompt = "\n\n".join(prompt_parts_b)
@@ -1226,7 +1313,11 @@ async def _stream_analysis(payload: "AnalyzeIn", user_id: str) -> AsyncIterator[
         print(f"[legal/stream] RAG retrieval failed (non-fatal): {e}")
 
     # ── 4. Build prompt ──────────────────────────────────────────────────────
-    base_prompt = _analysis_prompt(payload.case, payload.perspective, has_attachments=bool(attachments), language=case_lang)
+    # See AnalyzeIn.analysis_mode — "financial_only" swaps to a focused output.
+    if payload.analysis_mode == "financial_only":
+        base_prompt = _financial_only_prompt(payload.case, language=case_lang)
+    else:
+        base_prompt = _analysis_prompt(payload.case, payload.perspective, has_attachments=bool(attachments), language=case_lang)
     legal_db_block = format_for_prompt(legal_search_results)
     # Order: pgvector law (most authoritative) → Brave search → analysis template.
     # Claude reads top-down so the more concrete, retrieved law goes first.
