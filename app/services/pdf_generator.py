@@ -508,7 +508,25 @@ def _render_markdown(pdf, markdown: str) -> None:
     HSIZES  = {"#": 17, "##": 14, "###": 12, "####": 11}
     HCOLORS = {"#": BLUE, "##": GREEN, "###": DARK, "####": DARK}
 
-    lines = str(markdown or "").split("\n")
+    # fpdf2 raises FPDFUnicodeEncodingException when a glyph isn't in the
+    # current font's character set (most commonly: box-drawing chars `│` `─`,
+    # decorative arrows, or emoji on fonts without the right CMAP table).
+    # That exception used to bubble all the way out and cut the PDF off after
+    # the first unsupported line. Strip the offenders to a safe equivalent so
+    # the render keeps going. Keep the set deliberately narrow — we still want
+    # supported Unicode (Thai, Chinese, common arrows) to pass through.
+    _UNSUPPORTED_REPLACE = {
+        "│": " ",  "─": " ",  "┃": " ",  "━": " ",
+        "└": " ",  "┘": " ",  "┌": " ",  "┐": " ",
+        "├": " ",  "┤": " ",  "┬": " ",  "┴": " ",  "┼": " ",
+    }
+    def _sanitize(s: str) -> str:
+        # Quick path: if none of the offenders appear, return unchanged
+        if not any(c in s for c in _UNSUPPORTED_REPLACE):
+            return s
+        return "".join(_UNSUPPORTED_REPLACE.get(c, c) for c in s)
+
+    lines = [_sanitize(l) for l in str(markdown or "").split("\n")]
     i = 0
     while i < len(lines):
         raw  = lines[i]
@@ -650,12 +668,31 @@ def _render_markdown(pdf, markdown: str) -> None:
             i += 1
             continue
 
-        # Plain paragraph
+        # Plain paragraph — wrapped in try/except so an unsupported glyph
+        # we didn't catch in _sanitize() still doesn't truncate the rest of
+        # the document. On failure, fall back to a best-effort ASCII version
+        # of the line (drops the unsupported chars) instead of bailing.
         text = _strip_md(line)
         if text:
             pdf.set_font("Main", size=11)
             pdf.set_text_color(*DARK)
-            pdf.multi_cell(CONTENT_W, 6, text)
+            try:
+                pdf.multi_cell(CONTENT_W, 6, text)
+            except Exception as e:
+                # Strip every non-BMP/non-Thai/non-ASCII codepoint and retry.
+                safe = "".join(c for c in text if (
+                    ord(c) < 0x80 or                          # ASCII
+                    0x0E00 <= ord(c) <= 0x0E7F or             # Thai block
+                    0x4E00 <= ord(c) <= 0x9FFF or             # CJK
+                    0x2010 <= ord(c) <= 0x203F                # General punctuation
+                ))
+                try:
+                    if safe.strip():
+                        pdf.multi_cell(CONTENT_W, 6, safe)
+                except Exception:
+                    # Last resort: log and continue. Better an empty line
+                    # than a half-truncated PDF.
+                    print(f"[pdf_generator] skipped unrenderable line: {e}")
             pdf.ln(1)
         i += 1
 
