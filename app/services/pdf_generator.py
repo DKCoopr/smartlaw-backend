@@ -530,6 +530,41 @@ def _render_markdown(pdf, markdown: str) -> None:
             i += 1
             continue
 
+        # Fenced code block — ```mermaid is silently dropped (we can't render
+        # SVG diagrams in fpdf2 and showing the raw code would just be noise).
+        # Other languages render as a tinted monospace block so JSON/code
+        # snippets stay readable.
+        fence_m = re.match(r"^\s*```([a-zA-Z]*)\s*$", line)
+        if fence_m:
+            lang = (fence_m.group(1) or "").lower()
+            j = i + 1
+            while j < len(lines) and not lines[j].lstrip().startswith("```"):
+                j += 1
+            code_lines = lines[i + 1:j]
+            if lang in ("mermaid", "mmd"):
+                # Per UX request: if we can't show the flowchart as an image,
+                # show nothing — never dump the raw Mermaid source. The textual
+                # Timeline section above (also produced by the prompt) already
+                # carries the same information in a render-friendly form.
+                pass
+            else:
+                # Generic code block — render as monospace tinted box
+                pdf.ln(1)
+                pdf.set_fill_color(245, 248, 252)
+                pdf.set_draw_color(*GRAY)
+                try:
+                    pdf.set_font("Mono", size=9)
+                except Exception:
+                    pdf.set_font("Main", size=9)
+                for cl in code_lines:
+                    pdf.set_text_color(50, 70, 100)
+                    pdf.multi_cell(CONTENT_W, 5, cl, fill=True)
+                pdf.set_font("Main", size=11)
+                pdf.set_text_color(*DARK)
+                pdf.ln(2)
+            i = j + 1  # skip past closing fence
+            continue
+
         # Heading
         m = re.match(r"^(#{1,4})\s+(.+)$", line)
         if m:
