@@ -530,6 +530,27 @@ def _render_markdown(pdf, markdown: str) -> None:
             i += 1
             continue
 
+        # ── Orphan "Flowchart" heading guard ─────────────────────────────────
+        # When the AI still emits a "## 4. Flowchart (Mermaid)" heading right
+        # before a ```mermaid block (despite the prompt asking it not to), we
+        # want to drop BOTH the heading AND the code block — otherwise the
+        # rendered PDF shows an empty section title.
+        # Look-ahead: if this line is a heading whose text contains "Flowchart"
+        # or "Mermaid" (case-insensitive) AND the next non-blank line opens a
+        # mermaid fence, swallow the heading and let the fence handler below
+        # eat the block on the next iteration.
+        head_m = re.match(r"^(#{1,4})\s+(.+?)\s*$", line)
+        if head_m and re.search(r"\b(flowchart|mermaid)\b", head_m.group(2), re.IGNORECASE):
+            k = i + 1
+            while k < len(lines) and not lines[k].strip():
+                k += 1
+            if k < len(lines) and re.match(r"^\s*(?:`{3,}|~{3,})\s*(?:mermaid|mmd)\s*\r?$", lines[k], re.IGNORECASE):
+                # Skip the heading; the next iteration will hit the fence and
+                # drop the block. Don't advance past blank lines — let them
+                # render normally if any exist between.
+                i += 1
+                continue
+
         # Fenced code block — ```mermaid is silently dropped (we can't render
         # SVG diagrams in fpdf2 and showing the raw code would just be noise).
         # Other languages render as a tinted monospace block so JSON/code
