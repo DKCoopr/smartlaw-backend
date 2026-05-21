@@ -238,10 +238,10 @@ def _draw_logo(pdf, top_y: float = 36) -> float:
     pdf.set_text_color(*LOGO_DARK)
     pdf.cell(A4_W, 9, "Thai.Law", align="C", ln=1)
 
-    # ── "AI Legal Assistant" subtitle (letter-spaced) ──
+    # ── "Legal Assistant" subtitle (letter-spaced, centered) ──
     pdf.set_font("Main", "B", 8)
     pdf.set_text_color(*LOGO_SUB)
-    pdf.cell(A4_W, 4, "A I   L E G A L   A S S I S T A N T", align="C", ln=1)
+    pdf.cell(A4_W, 4, "L E G A L   A S S I S T A N T", align="C", ln=1)
 
     return pdf.get_y()
 
@@ -688,7 +688,7 @@ def _render_markdown(pdf, markdown: str, flowcharts: list | None = None) -> None
                     pdf.set_font("Main", size=9)
                 for cl in code_lines:
                     pdf.set_text_color(50, 70, 100)
-                    pdf.multi_cell(CONTENT_W, 5, cl, fill=True)
+                    pdf.multi_cell(CONTENT_W, 5, cl, fill=True, align="L")
                 pdf.set_font("Main", size=11)
                 pdf.set_text_color(*DARK)
                 pdf.ln(2)
@@ -705,7 +705,7 @@ def _render_markdown(pdf, markdown: str, flowcharts: list | None = None) -> None
             pdf.ln(5 if hashes == "#" else 3)
             pdf.set_font("Main", "B", size)
             pdf.set_text_color(*color)
-            pdf.multi_cell(CONTENT_W, 7 if len(hashes) <= 2 else 6, text)
+            pdf.multi_cell(CONTENT_W, 7 if len(hashes) <= 2 else 6, text, align="L")
             if hashes == "#":
                 pdf.set_draw_color(*GREEN)
                 pdf.set_line_width(0.4)
@@ -731,7 +731,7 @@ def _render_markdown(pdf, markdown: str, flowcharts: list | None = None) -> None
             pdf.set_font("Main", size=11)
             pdf.set_text_color(*DARK)
             pdf.set_x(MARGIN_L + 4)
-            pdf.multi_cell(CONTENT_W - 4, 6, "•  " + text)
+            pdf.multi_cell(CONTENT_W - 4, 6, "•  " + text, align="L")
             pdf.ln(1)
             i += 1
             continue
@@ -743,7 +743,7 @@ def _render_markdown(pdf, markdown: str, flowcharts: list | None = None) -> None
             pdf.set_font("Main", size=11)
             pdf.set_text_color(*DARK)
             pdf.set_x(MARGIN_L + 4)
-            pdf.multi_cell(CONTENT_W - 4, 6, f"{m.group(1)}. {text}")
+            pdf.multi_cell(CONTENT_W - 4, 6, f"{m.group(1)}. {text}", align="L")
             pdf.ln(1)
             i += 1
             continue
@@ -757,7 +757,7 @@ def _render_markdown(pdf, markdown: str, flowcharts: list | None = None) -> None
             pdf.set_font("Main", size=11)
             pdf.set_text_color(*DARK)
             try:
-                pdf.multi_cell(CONTENT_W, 6, text)
+                pdf.multi_cell(CONTENT_W, 6, text, align="L")
             except Exception as e:
                 # Strip every non-BMP/non-Thai/non-ASCII codepoint and retry.
                 safe = "".join(c for c in text if (
@@ -768,7 +768,7 @@ def _render_markdown(pdf, markdown: str, flowcharts: list | None = None) -> None
                 ))
                 try:
                     if safe.strip():
-                        pdf.multi_cell(CONTENT_W, 6, safe)
+                        pdf.multi_cell(CONTENT_W, 6, safe, align="L")
                 except Exception:
                     # Last resort: log and continue. Better an empty line
                     # than a half-truncated PDF.
@@ -819,7 +819,7 @@ def _add_closing_cover(pdf, lang: str) -> None:
     pdf.ln(2)
     pdf.set_font("Main", size=10)
     pdf.set_text_color(*GRAY)
-    pdf.cell(0, 6, "LEGAL  AI", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, "L E G A L   A S S I S T A N T", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(18)
     thanks = {
         "th": "ขอบคุณที่ใช้บริการ",
