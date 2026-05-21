@@ -8,9 +8,45 @@ Uses Sarabun (Thai+Latin) so dates, numbers, and Thai text all render correctly.
 
 import re
 import os
+import json
+import base64
 from datetime import datetime
 
 FONTS_DIR = os.environ.get("PDF_FONTS_DIR", "/app/fonts")
+
+
+# ── Mermaid → PNG renderer (uses public mermaid.ink service) ─────────────────
+# We render Mermaid diagrams as PNG images server-side and embed them in the
+# PDF. mermaid.ink is a free, no-auth-required service that accepts a base64
+# payload of {code, mermaid:{theme:...}} and returns a rendered PNG.
+#
+# Failure modes (all handled silently — never break the PDF build):
+#   • Network error / service down → caller catches, no image emitted
+#   • Mermaid syntax invalid       → mermaid.ink returns 400, we re-raise →
+#                                    caller catches → no image
+#   • Thai chars in node labels    → mermaid.ink supports UTF-8, but if the
+#                                    server-side font lacks coverage the
+#                                    diagram may have placeholder glyphs.
+#                                    Still better than nothing.
+def _render_mermaid_to_png(code: str, timeout_s: float = 15.0) -> bytes:
+    """
+    POST to mermaid.ink and return PNG bytes for the given Mermaid source.
+    Raises on failure so the caller can decide whether to skip silently.
+    """
+    import httpx  # local import — already in requirements but avoid top-level
+    state = {
+        "code": code,
+        "mermaid": {"theme": "default"},
+        "autoSync": True,
+        "rough": False,
+    }
+    payload = json.dumps(state).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    url = f"https://mermaid.ink/img/{encoded}?type=png&bgColor=ffffff"
+    with httpx.Client(timeout=timeout_s, follow_redirects=True) as client:
+        r = client.get(url)
+        r.raise_for_status()
+        return r.content
 
 # Colours (R, G, B)
 BLUE       = (29,  78, 216)
@@ -548,28 +584,12 @@ def _render_markdown(pdf, markdown: str) -> None:
             i += 1
             continue
 
-        # ── Orphan "Flowchart" heading guard ─────────────────────────────────
-        # When the AI still emits a "## 4. Flowchart (Mermaid)" heading right
-        # before a ```mermaid block (despite the prompt asking it not to), we
-        # want to drop BOTH the heading AND the code block — otherwise the
-        # rendered PDF shows an empty section title.
-        # Look-ahead: if this line is a heading whose text contains "Flowchart"
-        # or "Mermaid" (case-insensitive) AND the next non-blank line opens a
-        # mermaid fence, swallow the heading and let the fence handler below
-        # eat the block on the next iteration.
-        head_m = re.match(r"^(#{1,4})\s+(.+?)\s*$", line)
-        if head_m and re.search(r"\b(flowchart|mermaid)\b", head_m.group(2), re.IGNORECASE):
-            k = i + 1
-            while k < len(lines) and not lines[k].strip():
-                k += 1
-            if k < len(lines) and re.match(r"^\s*(?:`{3,}|~{3,})\s*(?:mermaid|mmd)\s*\r?$", lines[k], re.IGNORECASE):
-                # Skip the heading; the next iteration will hit the fence and
-                # drop the block. Don't advance past blank lines — let them
-                # render normally if any exist between.
-                i += 1
-                continue
+        # (Note: previous "orphan Flowchart heading skip" removed — we now
+        # actually render the Mermaid block as an embedded PNG, so the
+        # accompanying section heading "## 3.2 Flowchart Mermaid" is no
+        # longer orphan and should be rendered normally.)
 
-        # Fenced code block — ```mermaid is silently dropped (we can't render
+        # Fenced code block — ```mermaid is rendered to PNG via mermaid.ink
         # SVG diagrams in fpdf2 and showing the raw code would just be noise).
         # Other languages render as a tinted monospace block so JSON/code
         # snippets stay readable.
@@ -592,11 +612,25 @@ def _render_markdown(pdf, markdown: str) -> None:
                 j += 1
             code_lines = lines[i + 1:j]
             if lang in ("mermaid", "mmd"):
-                # Per UX request: if we can't show the flowchart as an image,
-                # show nothing — never dump the raw Mermaid source. The textual
-                # Timeline section above (also produced by the prompt) already
-                # carries the same information in a render-friendly form.
-                pass
+                # Render Mermaid → PNG via the public mermaid.ink service and
+                # embed the image. Falls back to silent skip if the service is
+                # unreachable / Mermaid is invalid / etc — never dump raw source.
+                code_str = "\n".join(code_lines).strip()
+                if code_str:
+                    try:
+                        png_bytes = _render_mermaid_to_png(code_str)
+                        if png_bytes:
+                            import io as _io
+                            img_buf = _io.BytesIO(png_bytes)
+                            # Center the diagram, cap width to content area
+                            pdf.ln(2)
+                            try:
+                                pdf.image(img_buf, x=MARGIN_L, w=CONTENT_W)
+                            except Exception as img_err:
+                                print(f"[pdf_generator] mermaid image embed failed: {img_err}")
+                            pdf.ln(3)
+                    except Exception as render_err:
+                        print(f"[pdf_generator] mermaid render skipped: {render_err}")
             else:
                 # Generic code block — render as monospace tinted box
                 pdf.ln(1)
