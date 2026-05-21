@@ -807,20 +807,19 @@ def generate_pdf(
 
 
 def _add_closing_cover(pdf, lang: str) -> None:
-    """Final branded page — Thai.Law wordmark + thank-you + AI disclaimer.
-    Centered both axes. Replaces the old inline footer with a dedicated page
-    so the report reads more like a formal document.
+    """Final branded page — same soundwave logo + wordmark + subtitle as the
+    front cover (via `_draw_logo`), followed by a localized thank-you line and
+    a date stamp at the bottom. Symmetry with the opening cover makes the
+    whole document feel like one cohesive report.
     """
     pdf.add_page(orientation="P")
-    pdf.ln(80)
-    pdf.set_font("Main", "B", 32)
-    pdf.set_text_color(*BLUE)
-    pdf.cell(0, 14, "Thai.Law", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(2)
-    pdf.set_font("Main", size=10)
-    pdf.set_text_color(*GRAY)
-    pdf.cell(0, 6, "L E G A L   A S S I S T A N T", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(18)
+
+    # Reuse the front-cover logo block (bars + "Thai.Law" + subtitle).
+    # top_y=95 centers it roughly mid-page; the function returns the Y at
+    # which we can keep drawing.
+    after_logo_y = _draw_logo(pdf, top_y=95)
+
+    pdf.set_y(after_logo_y + 8)
     thanks = {
         "th": "ขอบคุณที่ใช้บริการ",
         "en": "Thank you for using Thai.Law",
