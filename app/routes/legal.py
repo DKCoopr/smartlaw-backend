@@ -1771,6 +1771,11 @@ class ExportPdfRequest(BaseModel):
     court: str = ""
     case_number: str = ""
     claim_amount: float = 0.0
+    # Frontend pre-renders ```mermaid blocks to PNG (browser already runs
+    # Mermaid for the on-screen UI) and ships them here as base64. They're
+    # index-aligned with `<!--MERMAID_PNG:N-->` markers in `markdown`. Backend
+    # gives each one its own dedicated page in the PDF.
+    flowcharts: List[str] = []
 
 @router.post("/export-pdf")
 async def export_pdf(
@@ -1806,7 +1811,10 @@ async def export_pdf(
         pdf_bytes: bytes = await asyncio.wait_for(
             loop.run_in_executor(
                 None,
-                functools.partial(generate_pdf, payload.markdown, lang, case_meta, payload.perspective),
+                functools.partial(
+                    generate_pdf, payload.markdown, lang, case_meta,
+                    payload.perspective, payload.flowcharts,
+                ),
             ),
             timeout=100.0,
         )

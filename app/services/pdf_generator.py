@@ -503,8 +503,84 @@ def _render_md_table(pdf, table_lines: list) -> None:
 
 # ── Markdown content renderer ─────────────────────────────────────────────────
 
-def _render_markdown(pdf, markdown: str) -> None:
-    """Parse markdown line-by-line and emit fpdf2 output directly."""
+def _emit_flowchart_page(pdf, png_b64: str) -> None:
+    """
+    Add a NEW PAGE and place the given base64-encoded PNG flowchart on it,
+    fitted to (almost) the full page with a small margin. We pick portrait
+    or landscape orientation automatically based on the image aspect ratio
+    so wide flowcharts don't get squashed.
+
+    Silent skip on any failure — the rest of the document keeps building.
+    """
+    import base64
+    import io
+    try:
+        png_bytes = base64.b64decode(png_b64)
+    except Exception as e:
+        print(f"[pdf_generator] flowchart base64 decode failed: {e}")
+        return
+
+    # Measure to choose orientation. Pillow is in requirements but be defensive.
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(png_bytes))
+        px_w, px_h = img.size
+    except Exception as e:
+        print(f"[pdf_generator] flowchart measure failed, using portrait: {e}")
+        px_w, px_h = 1000, 1200
+
+    landscape = px_w > px_h * 1.15  # noticeably wider than tall
+    # Page geometry. fpdf2 lets us request a per-page orientation.
+    if landscape:
+        pdf.add_page(orientation="L")
+        page_w, page_h = A4_H, A4_W   # swap for landscape
+    else:
+        pdf.add_page(orientation="P")
+        page_w, page_h = A4_W, A4_H
+
+    # Inner usable area — leave a small margin so it doesn't touch the edge.
+    pad = 8.0
+    avail_w = page_w - 2 * pad
+    avail_h = page_h - 2 * pad - 10  # leave room for a small caption below
+
+    # Scale to fit while preserving aspect ratio.
+    ratio = px_h / max(1, px_w)
+    draw_w = avail_w
+    draw_h = draw_w * ratio
+    if draw_h > avail_h:
+        draw_h = avail_h
+        draw_w = draw_h / ratio
+
+    # Centre on the page.
+    x = (page_w - draw_w) / 2
+    y = (page_h - draw_h) / 2 - 4   # nudge up slightly to make room for caption
+
+    try:
+        pdf.image(io.BytesIO(png_bytes), x=x, y=y, w=draw_w, h=draw_h)
+    except Exception as e:
+        print(f"[pdf_generator] flowchart image embed failed: {e}")
+        return
+
+    # Tiny caption below the diagram. Helps readers know it's a flowchart of
+    # the financial transactions, not a standalone image. Use a small font
+    # and centre alignment.
+    try:
+        pdf.set_xy(pad, y + draw_h + 4)
+        pdf.set_font("Main", size=9)
+        pdf.set_text_color(*GRAY)
+        pdf.cell(avail_w, 5, "Flowchart — ธุรกรรมการเงิน", align="C")
+    except Exception:
+        pass
+
+
+def _render_markdown(pdf, markdown: str, flowcharts: list | None = None) -> None:
+    """Parse markdown line-by-line and emit fpdf2 output directly.
+
+    `flowcharts` is a list of base64 PNG strings. We swap each
+    `<!--MERMAID_PNG:N-->` placeholder for a dedicated full-page flowchart
+    via _emit_flowchart_page().
+    """
+    flowcharts = flowcharts or []
 
     HSIZES  = {"#": 17, "##": 14, "###": 12, "####": 11}
     HCOLORS = {"#": BLUE, "##": GREEN, "###": DARK, "####": DARK}
@@ -536,6 +612,21 @@ def _render_markdown(pdf, markdown: str) -> None:
         # Blank line
         if not line.strip():
             pdf.ln(2)
+            i += 1
+            continue
+
+        # Flowchart placeholder → dedicated page with the PNG fitted to the
+        # page (portrait or landscape, auto-picked). Continues rendering on a
+        # fresh portrait page afterwards so subsequent markdown content
+        # doesn't share the flowchart's landscape page.
+        mmd_m = re.match(r"^\s*<!--MERMAID_PNG:(\d+)-->\s*$", line)
+        if mmd_m:
+            idx = int(mmd_m.group(1))
+            if 0 <= idx < len(flowcharts):
+                _emit_flowchart_page(pdf, flowcharts[idx])
+                # If we just placed a landscape page, return to portrait for
+                # any markdown content that comes after.
+                pdf.add_page(orientation="P")
             i += 1
             continue
 
@@ -691,7 +782,13 @@ def generate_pdf(
     lang: str = "th",
     case_meta: dict | None = None,
     perspective: str = "",
+    flowcharts: list | None = None,
 ) -> bytes:
+    """
+    `flowcharts` — list of base64 PNG strings keyed by index. The markdown
+    has `<!--MERMAID_PNG:N-->` placeholders that we turn into dedicated
+    single-page flowchart pages (one PNG per page, fitted to the page).
+    """
     meta = case_meta or {}
     case_title = meta.get("title") or "Thai.Law Analysis"
 
@@ -699,7 +796,7 @@ def generate_pdf(
     _add_cover(pdf, case_title, meta, perspective, lang)
 
     pdf.add_page()
-    _render_markdown(pdf, markdown)
+    _render_markdown(pdf, markdown, flowcharts or [])
 
     # Footer
     pdf.ln(6)
