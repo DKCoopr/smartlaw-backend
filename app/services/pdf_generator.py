@@ -534,11 +534,22 @@ def _render_markdown(pdf, markdown: str) -> None:
         # SVG diagrams in fpdf2 and showing the raw code would just be noise).
         # Other languages render as a tinted monospace block so JSON/code
         # snippets stay readable.
-        fence_m = re.match(r"^\s*```([a-zA-Z]*)\s*$", line)
+        #
+        # Regex is intentionally permissive:
+        #   - leading whitespace                    (\s*)
+        #   - 3+ backticks OR 3+ tildes             ( ```+ | ~~~+ )
+        #   - optional language identifier          ([a-zA-Z_][\w-]*)?
+        #   - any trailing whitespace incl \r       (\s*$)
+        # Some markdown emitters use 4+ backticks or ~~~ as the fence char,
+        # and Anthropic streams occasionally include a trailing \r before \n —
+        # the previous tighter regex missed those and dumped the raw source.
+        fence_m = re.match(r"^\s*(?:`{3,}|~{3,})\s*([a-zA-Z_][\w-]*)?\s*\r?$", line)
         if fence_m:
             lang = (fence_m.group(1) or "").lower()
             j = i + 1
-            while j < len(lines) and not lines[j].lstrip().startswith("```"):
+            # Match a closing fence of the SAME family (backticks vs tildes)
+            close_re = re.compile(r"^\s*(?:`{3,}|~{3,})\s*\r?$")
+            while j < len(lines) and not close_re.match(lines[j]):
                 j += 1
             code_lines = lines[i + 1:j]
             if lang in ("mermaid", "mmd"):
