@@ -39,6 +39,14 @@ pypdf==4.2.0
 
 # Server-side PDF generation (pure Python, embeds TTF fonts — no system deps)
 fpdf2==2.7.9
+# Text shaping — required so Thai vowel/tone marks position correctly above
+# their base consonant. Without this, fpdf2 places each Unicode codepoint at
+# a fixed advance width and combining marks float as separate glyphs that
+# overlap neighboring characters (visible as "characters touching each other"
+# in titles). uharfbuzz is fpdf2's optional HarfBuzz binding — when present,
+# pdf.set_text_shaping(True) enables proper script shaping for Thai / Arabic
+# / Devanagari etc.
+uharfbuzz==0.39.3
 beautifulsoup4==4.12.3
 
 # Image resizing before sending to Claude — Anthropic enforces ≤2000px per

@@ -99,6 +99,19 @@ def _build_fpdf(lang: str):
         pdf.add_font("Main", "B", bold,      uni=True)
 
     pdf.set_font("Main", size=11)
+
+    # Enable HarfBuzz text shaping for proper Thai/Arabic/Devanagari/etc layout.
+    # Without this fpdf2 places each codepoint at a fixed advance width and
+    # Thai combining marks (sara-ii, mai-ek, sara-ai…) end up floating beside
+    # the base consonant instead of stacking above/below it — visible as
+    # title characters appearing to touch each other. With uharfbuzz present
+    # (see requirements.txt) the call below activates real script shaping.
+    try:
+        pdf.set_text_shaping(use_shaping_engine=True)
+    except Exception as e:
+        # uharfbuzz not installed, or fpdf2 too old, or some other shaping
+        # init failure — render still works, just without proper Thai shaping.
+        print(f"[pdf_generator] text shaping unavailable: {e}", flush=True)
     return pdf
 
 
