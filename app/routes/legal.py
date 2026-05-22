@@ -1826,12 +1826,21 @@ async def export_pdf(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
-    safe_name = payload.filename.replace('"', "'")
+    # Content-Disposition can't carry non-Latin-1 chars directly — HTTP headers
+    # are restricted to ISO-8859-1 by the underlying ASGI server. When the case
+    # title contains Thai (or CJK / Arabic / etc.) characters, we need to use
+    # RFC 5987 syntax: provide an ASCII-safe fallback filename, plus a
+    # `filename*=UTF-8''<percent-encoded>` extension that modern browsers
+    # prefer. This is what Django, Flask-Send-File, and Starlette docs all use.
+    import urllib.parse as _urllib
+    raw_name  = payload.filename.replace('"', "'")
+    ascii_safe = "".join(c if (32 < ord(c) < 127 and c not in '"\\') else "_" for c in raw_name) or "analysis.pdf"
+    utf8_enc  = _urllib.quote(raw_name, safe="")
     return StreamingResponse(
         io.BytesIO(pdf_bytes),
         media_type="application/pdf",
         headers={
-            "Content-Disposition": f'attachment; filename="{safe_name}"',
+            "Content-Disposition": f"attachment; filename=\"{ascii_safe}\"; filename*=UTF-8''{utf8_enc}",
             "Content-Length":      str(len(pdf_bytes)),
         },
     )
